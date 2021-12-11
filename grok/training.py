@@ -18,9 +18,10 @@ import torch
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers import WandbLogger
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
+import wandb
 
 import grok.metrics as metrics
 from grok.data import (
@@ -479,46 +480,46 @@ class TrainableTransformer(LightningModule):
         :returns: a dict with loss, accuracy, lr, probabilities of solutions,
                   attentions, and values
         """
-        epoch_is_to_be_logged = self.current_epoch == self.next_train_epoch_to_log
-        if epoch_is_to_be_logged:
-            self.next_train_epoch_to_log = max(
-                int(1.01 * self.next_train_epoch_to_log),
-                self.next_train_epoch_to_log + 1,
-            )
-            with torch.no_grad():
-                try:
-                    loss = torch.stack([x["partial_train_loss"] for x in outputs]).sum()
-                except Exception as e:
-                    print("!" * 80)
-                    print(outputs)
-                    raise e
-                perplexity = torch.exp(loss)
-                accuracy = torch.stack(
-                    [x["partial_train_accuracy"] for x in outputs]
-                ).sum()
-            # avg_lr = torch.stack([x["learning_rate"] for x in outputs]).mean()
-            # max_lr = torch.stack([x["learning_rate"] for x in outputs]).max()
-            # last_lr = outputs[-1]["learning_rate"]
-            first_lr = outputs[0]["learning_rate"]
+        # epoch_is_to_be_logged = self.current_epoch == self.next_train_epoch_to_log
+        # if epoch_is_to_be_logged:
+        #     self.next_train_epoch_to_log = max(
+        #         int(1.01 * self.next_train_epoch_to_log),
+        #         self.next_train_epoch_to_log + 1,
+        #     )
+        with torch.no_grad():
+            try:
+                loss = torch.stack([x["partial_train_loss"] for x in outputs]).sum()
+            except Exception as e:
+                print("!" * 80)
+                print(outputs)
+                raise e
+            perplexity = torch.exp(loss)
+            accuracy = torch.stack(
+                [x["partial_train_accuracy"] for x in outputs]
+            ).sum()
+        # avg_lr = torch.stack([x["learning_rate"] for x in outputs]).mean()
+        # max_lr = torch.stack([x["learning_rate"] for x in outputs]).max()
+        # last_lr = outputs[-1]["learning_rate"]
+        first_lr = outputs[0]["learning_rate"]
 
-            if self.hparams.save_activations or self.hparams.save_outputs:
-                if self.current_epoch == 0:
-                    self._save_inputs(outputs, ds="train")
-                self._save_activations(outputs, ds="train")
+        if self.hparams.save_activations or self.hparams.save_outputs:
+            if self.current_epoch == 0:
+                self._save_inputs(outputs, ds="train")
+            self._save_activations(outputs, ds="train")
 
-            logs = {
-                "train_loss": loss,
-                "train_accuracy": accuracy,
-                "train_perplexity": perplexity,
-                "learning_rate": first_lr,
-                "len_train_ds": len(self.train_dataset),
-                "len_val_ds": len(self.val_dataset),
-                "batches_per_epoch": self.batches_per_epoch,
-                "time_per_epoch": time.time() - self.training_epoch_start_time,
-                "fwd_time_in_epoch": self.fwd_time_in_epoch,
-            }
-            for k, v in logs.items():
-                self.log(k, v)
+        logs = {
+            "train_loss": loss,
+            "train_accuracy": accuracy,
+            "train_perplexity": perplexity,
+            "learning_rate": first_lr,
+            "len_train_ds": len(self.train_dataset),
+            "len_val_ds": len(self.val_dataset),
+            "batches_per_epoch": self.batches_per_epoch,
+            "time_per_epoch": time.time() - self.training_epoch_start_time,
+            "fwd_time_in_epoch": self.fwd_time_in_epoch,
+        }
+        for k, v in logs.items():
+            self.log(k, v)
 
     def validation_step(self, batch, batch_idx):
         """
@@ -530,10 +531,10 @@ class TrainableTransformer(LightningModule):
         :returns: a dict with val_loss, val_accuracy, probabilities of solutions,
                   attentions, and values
         """
-        if self.next_epoch_to_eval < self.current_epoch:
-            self.next_epoch_to_eval = self.current_epoch
-        if self.current_epoch != self.next_epoch_to_eval:
-            return {}
+        # if self.next_epoch_to_eval < self.current_epoch:
+        #     self.next_epoch_to_eval = self.current_epoch
+        # if self.current_epoch != self.next_epoch_to_eval:
+        #     return {}
         with torch.no_grad():
             loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
                 batch=batch, batch_idx=batch_idx, train=False
@@ -559,46 +560,53 @@ class TrainableTransformer(LightningModule):
         :param batch_idx: which batch this is in the epoch.
         :returns: a dict with val_loss, val_accuracy
         """
-        validation_is_real = len(outputs[0]) != 0
+        
+        # validation_is_real = len(outputs[0]) != 0 # raises an error if validation_step returns {}
+        # validation_is_real = len(outputs) != 0
+        # if validation_is_real:
+        #     validation_is_real = len(outputs[0]) != 0
 
-        if validation_is_real:
-            self.next_epoch_to_eval = max(
-                int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
-            )
+        # if validation_is_real:
+            # self.next_epoch_to_eval = max(
+            #     int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
+            # )
 
-            loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
-            perplexity = torch.exp(loss)
-            accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
+        loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
+        perplexity = torch.exp(loss)
+        accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
 
-            if self.hparams.save_activations or self.hparams.save_outputs:
-                if self.current_epoch == 0:
-                    self._save_inputs(outputs, ds="val")
-                self._save_activations(outputs, ds="val")
+        if self.hparams.save_activations or self.hparams.save_outputs:
+            if self.current_epoch == 0:
+                self._save_inputs(outputs, ds="val")
+            self._save_activations(outputs, ds="val")
 
-            logs = {
-                "val_loss": loss,
-                "val_accuracy": accuracy,
-                "val_perplexity": perplexity,
-            }
-            for name, param in self.named_parameters():
-                # n parameters
-                n_params = param.numel()
-                # get the l2 norm of the parameter
-                logs["paramnorm_" + name] = torch.norm(
-                    param, 2
-                ).detach().cpu().numpy() / np.sqrt(n_params)
+        logs = {
+            "val_loss": loss,
+            "val_accuracy": accuracy,
+            "val_perplexity": perplexity,
+        }
+        print(f"\nStep = {self.global_step}")
+        print(f"val_loss = {loss}")
+        print(f"val_accuracy = {accuracy}")
+        for name, param in self.named_parameters():
+            # n parameters
+            n_params = param.numel()
+            # get the l2 norm of the parameter
+            logs["paramnorm_" + name] = torch.norm(
+                param, 2
+            ).detach().cpu().numpy() / np.sqrt(n_params)
 
-            # train accuracy
-            device = self.transformer.embedding.weight.device
-            train_data = self.train_dataset.data.to(device)
-            training_data = {"text": train_data[:, :-1], "target": train_data[:, 1:]}
-            with torch.no_grad():
-                tr_loss, tr_acc, *_ = self._step(training_data, 0)
-                logs["full_train_loss"] = tr_loss
-                logs["full_train_acc"] = tr_acc
+        # train accuracy
+        device = self.transformer.embedding.weight.device
+        train_data = self.train_dataset.data.to(device)
+        training_data = {"text": train_data[:, :-1], "target": train_data[:, 1:]}
+        with torch.no_grad():
+            tr_loss, tr_acc, *_ = self._step(training_data, 0)
+            logs["full_train_loss"] = tr_loss
+            logs["full_train_acc"] = tr_acc
 
-            for k, v in logs.items():
-                self.log(k, v)
+        for k, v in logs.items():
+            self.log(k, v)
         # save a checkpoint if the epoch is a power of 2
         if (
             self.current_epoch > 0
@@ -611,8 +619,8 @@ class TrainableTransformer(LightningModule):
                     "epoch_" + str(self.current_epoch) + ".ckpt",
                 )
             )
-        if validation_is_real:
-            return logs
+        # if validation_is_real:
+        return logs
 
     def test_step(self, batch, batch_idx):
         """
@@ -705,7 +713,8 @@ def train(hparams: Namespace) -> None:
 
     torch.save(model, os.path.join(checkpoint_path, "init.pt"))
 
-    logger = CSVLogger(hparams.logdir)
+    # logger = CSVLogger(hparams.logdir)
+    logger = WandbLogger(hparams.logdir)
 
     # checkpointer = ModelCheckpoint(
     #     filepath=checkpoint_path,
@@ -719,12 +728,12 @@ def train(hparams: Namespace) -> None:
         "max_steps": hparams.max_steps,
         "min_steps": hparams.max_steps,
         "max_epochs": int(1e8),
-        "val_check_interval": 1,
+        # "val_check_interval": 1.0,
         "profiler": False,
         # "checkpoint_callback": checkpointer,
         "logger": logger,
         "log_every_n_steps": 1,
-        "flush_logs_every_n_steps": 1000,
+        # "flush_logs_every_n_steps": 1000, # deprecated in lightning 1.5, will be removed in 1.7
     }
     if torch.cuda.is_available() and hparams.gpu >= 0:
         trainer_args["gpus"] = [hparams.gpu]
