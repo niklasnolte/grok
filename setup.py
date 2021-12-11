@@ -13,5 +13,6 @@ setup(
         "scipy",
         "mod",
         "matplotlib",
+        "sympy"
     ],
 )
