@@ -41,23 +41,24 @@ class TrainableTransformer(LightningModule):
     Adds training methods to train a generic transformer on arithmetic equations
     """
 
-    def __init__(self, hparams: Namespace) -> None:
+    def __init__(self, **hparams: Dict) -> None:
         """
         :param hparams: An argparse.Namespace with parameters defined in
                         self.add_model_specific_args().
         """
         super().__init__()
-        self.hparams = hparams  # type: ignore
+
+        self.save_hyperparameters(hparams)
         self.prepare_data()
 
         self.transformer = Transformer(
-            hparams.n_layers,
-            hparams.n_heads,
-            hparams.d_model,
-            hparams.dropout,
-            hparams.max_context_len,
+            self.hparams.n_layers,
+            self.hparams.n_heads,
+            self.hparams.d_model,
+            self.hparams.dropout,
+            self.hparams.max_context_len,
             len(self.train_dataset.tokenizer),
-            hparams.non_linearity,
+            self.hparams.non_linearity,
             weight_noise=self.hparams.weight_noise,
         )
 
@@ -700,7 +701,7 @@ def train(hparams: Namespace) -> None:
     hparams.checkpoint_path = checkpoint_path
 
     # Create the model
-    model = TrainableTransformer(hparams).float()
+    model = TrainableTransformer(**vars(hparams)).float()
 
     torch.save(model, os.path.join(checkpoint_path, "init.pt"))
 
@@ -787,7 +788,7 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
     hparams.checkpoint_path = checkpoint_path
 
     # Create the model
-    model = TrainableTransformer(hparams).float()
+    model = TrainableTransformer(**vars(hparams)).float()
 
     torch.save(model, os.path.join(checkpoint_path, "init.pt"))
 
@@ -822,8 +823,8 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
         # print(checkpoint["hyper_parameters"])
 
         hps = checkpoint["hyper_parameters"]
-        hps = argparse.Namespace(**hps)
-        model = TrainableTransformer(hps).float()
+        # hps = argparse.Namespace(**hps)
+        model = TrainableTransformer(**hps).float()
         model.load_state_dict(checkpoint["state_dict"])
 
         phi = get_sharpness(model.train_dataloader(), model)
