@@ -21,6 +21,7 @@ from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
+from torch.optim import AdamW
 import wandb
 
 import grok.metrics as metrics
@@ -222,25 +223,14 @@ class TrainableTransformer(LightningModule):
 
         :returns: optimizers and schedulers.
         """
-        optimizer = CustomAdamW(
+        optimizer = AdamW(
             self.parameters(),
-            betas=(0.9, 0.98),
-            eps=1e-8,
-            lr=1,
             weight_decay=self.hparams.weight_decay,
-            noise_factor=self.hparams.noise_factor,
-            weight_decay_form=self.hparams.weight_decay_kind,
+            lr=1,
+            betas=(0.9, 0.98),
+            eps=1e-8
         )
-        # optimizer = SAM(
-        #     self.parameters(),
-        #     base_optimizer=CustomAdamW,
-        #     rho=0.05,
-        #     betas=(0.9, 0.98),
-        #     eps=1e-8,
-        #     lr=1,
-        #     weight_decay=self.hparams.weight_decay,
-        #     noise_factor=self.hparams.noise_factor,
-        # )
+
         schedulers = [
             {
                 "scheduler": LambdaLR(optimizer, lr_lambda=self._scheduler_lr),
@@ -453,8 +443,8 @@ class TrainableTransformer(LightningModule):
         self.fwd_time_in_epoch += time.time() - start
 
         schedulers = self.trainer.lr_schedulers[0]
-        if self.current_epoch != self.next_train_epoch_to_log:
-            return {"loss": loss}
+        # if self.current_epoch != self.next_train_epoch_to_log:
+            # return {"loss": loss}
         lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
         output = {
             "loss": loss,
@@ -548,7 +538,6 @@ class TrainableTransformer(LightningModule):
         }
         if self.current_epoch == 0:
             output["x_lhs"] = x_lhs
-
         return output
 
     def validation_epoch_end(self, outputs):
@@ -562,65 +551,65 @@ class TrainableTransformer(LightningModule):
         """
         
         # validation_is_real = len(outputs[0]) != 0 # raises an error if validation_step returns {}
-        # validation_is_real = len(outputs) != 0
-        # if validation_is_real:
-        #     validation_is_real = len(outputs[0]) != 0
+        validation_is_real = len(outputs) != 0
+        if validation_is_real:
+            validation_is_real = len(outputs[0]) != 0
 
         # if validation_is_real:
             # self.next_epoch_to_eval = max(
             #     int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
             # )
+        if validation_is_real:
+            loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
+            perplexity = torch.exp(loss)
+            accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
 
-        loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
-        perplexity = torch.exp(loss)
-        accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
+            if self.hparams.save_activations or self.hparams.save_outputs:
+                if self.current_epoch == 0:
+                    self._save_inputs(outputs, ds="val")
+                self._save_activations(outputs, ds="val")
 
-        if self.hparams.save_activations or self.hparams.save_outputs:
-            if self.current_epoch == 0:
-                self._save_inputs(outputs, ds="val")
-            self._save_activations(outputs, ds="val")
+            logs = {
+                "val_loss": loss,
+                "val_accuracy": accuracy,
+                "val_perplexity": perplexity,
+            }
+            print(f"\nStep = {self.global_step}")
+            print(f"val_loss = {loss}")
+            print(f"val_accuracy = {accuracy}")
+            for name, param in self.named_parameters():
+                # n parameters
+                n_params = param.numel()
+                # get the l2 norm of the parameter
+                logs["paramnorm_" + name] = torch.norm(
+                    param, 2
+                ).detach().cpu().numpy() / np.sqrt(n_params)
 
-        logs = {
-            "val_loss": loss,
-            "val_accuracy": accuracy,
-            "val_perplexity": perplexity,
-        }
-        print(f"\nStep = {self.global_step}")
-        print(f"val_loss = {loss}")
-        print(f"val_accuracy = {accuracy}")
-        for name, param in self.named_parameters():
-            # n parameters
-            n_params = param.numel()
-            # get the l2 norm of the parameter
-            logs["paramnorm_" + name] = torch.norm(
-                param, 2
-            ).detach().cpu().numpy() / np.sqrt(n_params)
+            # train accuracy
+            device = self.transformer.embedding.weight.device
+            train_data = self.train_dataset.data.to(device)
+            training_data = {"text": train_data[:, :-1], "target": train_data[:, 1:]}
+            with torch.no_grad():
+                tr_loss, tr_acc, *_ = self._step(training_data, 0)
+                logs["full_train_loss"] = tr_loss
+                logs["full_train_acc"] = tr_acc
 
-        # train accuracy
-        device = self.transformer.embedding.weight.device
-        train_data = self.train_dataset.data.to(device)
-        training_data = {"text": train_data[:, :-1], "target": train_data[:, 1:]}
-        with torch.no_grad():
-            tr_loss, tr_acc, *_ = self._step(training_data, 0)
-            logs["full_train_loss"] = tr_loss
-            logs["full_train_acc"] = tr_acc
-
-        for k, v in logs.items():
-            self.log(k, v)
-        # save a checkpoint if the epoch is a power of 2
-        if (
-            self.current_epoch > 0
-            and int(2 ** (int(np.log(self.current_epoch) / np.log(2))))
-            == self.current_epoch
-        ):
-            self.trainer.save_checkpoint(
-                os.path.join(
-                    self.hparams.checkpoint_path,
-                    "epoch_" + str(self.current_epoch) + ".ckpt",
+            for k, v in logs.items():
+                self.log(k, v)
+            # save a checkpoint if the epoch is a power of 2
+            if (
+                self.current_epoch > 0
+                and int(2 ** (int(np.log(self.current_epoch) / np.log(2))))
+                == self.current_epoch
+            ):
+                self.trainer.save_checkpoint(
+                    os.path.join(
+                        self.hparams.checkpoint_path,
+                        "epoch_" + str(self.current_epoch) + ".ckpt",
+                    )
                 )
-            )
-        # if validation_is_real:
-        return logs
+            # if validation_is_real:
+            return logs
 
     def test_step(self, batch, batch_idx):
         """
@@ -857,225 +846,3 @@ def add_args(parser=None) -> Namespace:
     # parser.add_argument("--checkpoint_period", type=int, default=1)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser
-
-
-class CustomAdamW(torch.optim.Optimizer):
-    def __init__(
-        self,
-        params,
-        lr=1e-3,
-        betas=(0.9, 0.999),
-        eps=1e-8,
-        weight_decay=1e-2,
-        amsgrad=False,
-        noise_factor=0.0,
-        weight_decay_form="to_zero",
-    ):
-        if not 0.0 <= lr:
-            raise ValueError("Invalid learning rate: {}".format(lr))
-        if not 0.0 <= eps:
-            raise ValueError("Invalid epsilon value: {}".format(eps))
-        if not 0.0 <= betas[0] < 1.0:
-            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
-        if not 0.0 <= betas[1] < 1.0:
-            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
-        if not weight_decay_form in ["to_zero", "to_init", "jiggle", "honest"]:
-            raise ValueError(
-                f"Invalid weight decay form: {weight_decay_form}, should be one of ['to_zero', 'to_init', 'jiggle']"
-            )
-        # if not 0.0 <= weight_decay:
-        #     raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
-        defaults = dict(
-            lr=lr,
-            betas=betas,
-            eps=eps,
-            weight_decay=weight_decay,
-            amsgrad=amsgrad,
-            noise_factor=noise_factor,
-            weight_decay_form=weight_decay_form,
-        )
-        super(CustomAdamW, self).__init__(params, defaults)
-
-    def __setstate__(self, state):
-        super(CustomAdamW, self).__setstate__(state)
-        for group in self.param_groups:
-            group.setdefault("amsgrad", False)
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        """Performs a single optimization step.
-
-        Arguments:
-            closure (callable, optional): A closure that reevaluates the model
-                and returns the loss.
-        """
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-
-                # Perform optimization step
-                grad = p.grad
-
-                if group["weight_decay"] > 0:
-                    if group["weight_decay_form"] == "honest":
-                        grad = grad + group["weight_decay"] * p.detach()
-
-                if grad.is_sparse:
-                    raise RuntimeError(
-                        "Adam does not support sparse gradients, please consider SparseAdam instead"
-                    )
-                amsgrad = group["amsgrad"]
-
-                state = self.state[p]
-
-                # State initialization
-                if len(state) == 0:
-                    state["step"] = 0
-                    # Exponential moving average of gradient values
-                    state["exp_avg"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
-                    )
-                    # Exponential moving average of squared gradient values
-                    state["exp_avg_sq"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
-                    )
-                    if group["weight_decay_form"] == "to_init":
-                        state["init"] = p.detach().clone()
-                    if amsgrad:
-                        # Maintains max of all exp. moving avg. of sq. grad. values
-                        state["max_exp_avg_sq"] = torch.zeros_like(
-                            p, memory_format=torch.preserve_format
-                        )
-
-                if group["weight_decay"] > 0:
-                    if group["weight_decay_form"] == "to_zero":
-                        p.mul_(1 - group["lr"] * group["weight_decay"])
-                    elif group["weight_decay_form"] == "to_init":
-                        p.add_(
-                            (state["init"] - p) * (group["lr"] * group["weight_decay"])
-                        )
-                    elif group["weight_decay_form"] == "jiggle":
-                        p.mul_(
-                            torch.exp(
-                                torch.randn(1).cuda()
-                                * (group["lr"] * group["weight_decay"])
-                            )
-                        )
-                    elif group["weight_decay_form"] == "honest":
-                        pass
-                    else:
-                        raise ValueError(
-                            f"Invalid weight decay form: {group['weight_decay_form']}"
-                        )
-
-                exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
-                if amsgrad:
-                    max_exp_avg_sq = state["max_exp_avg_sq"]
-                beta1, beta2 = group["betas"]
-
-                state["step"] += 1
-                bias_correction1 = 1 - beta1 ** state["step"]
-                bias_correction2 = 1 - beta2 ** state["step"]
-
-                # Decay the first and second moment running average coefficient
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-                if amsgrad:
-                    # Maintains the maximum of all 2nd moment running avg. till now
-                    torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
-                    # Use the max. for normalizing running avg. of gradient
-                    denom = (max_exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(
-                        group["eps"]
-                    )
-                else:
-                    denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(
-                        group["eps"]
-                    )
-
-                step_size = group["lr"] / bias_correction1
-
-                upd = exp_avg / denom
-                # add uniform gaussian noise to the update
-                if group["noise_factor"] > 0:
-                    upd += torch.randn_like(upd) * group["noise_factor"]
-                # if group['noise_factor'] > 0:
-                #     upd *= torch.exp(torch.randn_like(upd) * group['noise_factor'])
-                p.add_(-step_size * upd)
-
-        return loss
-
-
-class SAM(torch.optim.Optimizer):
-    def __init__(self, params, base_optimizer, rho=0.05, **kwargs):
-        assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
-
-        defaults = dict(rho=rho, **kwargs)
-        super(SAM, self).__init__(params, defaults)
-
-        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
-        self.param_groups = self.base_optimizer.param_groups
-
-    @torch.no_grad()
-    def first_step(self, zero_grad=False):
-        grad_norm = self._grad_norm()
-        for group in self.param_groups:
-            scale = group["rho"] / (grad_norm + 1e-12)
-
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                e_w = p.grad * scale.to(p)
-                p.add_(e_w)  # climb to the local maximum "w + e(w)"
-                self.state[p]["e_w"] = e_w
-
-        if zero_grad:
-            self.zero_grad()
-
-    @torch.no_grad()
-    def second_step(self, zero_grad=False):
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                p.sub_(self.state[p]["e_w"])  # get back to "w" from "w + e(w)"
-
-        self.base_optimizer.step()  # do the actual "sharpness-aware" update
-
-        if zero_grad:
-            self.zero_grad()
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        assert (
-            closure is not None
-        ), "Sharpness Aware Minimization requires closure, but it was not provided"
-        closure = torch.enable_grad()(
-            closure
-        )  # the closure should do a full forward-backward pass
-
-        self.first_step(zero_grad=True)
-        closure()
-        self.second_step()
-
-    def _grad_norm(self):
-        shared_device = self.param_groups[0]["params"][
-            0
-        ].device  # put everything on the same device, in case of model parallelism
-        grad_norms = [
-            p.grad.norm(p=2).to(shared_device)
-            for group in self.param_groups
-            for p in group["params"]
-            if p.grad is not None
-        ]
-        print("grad norms is ", grad_norms, "!" * 1000)
-        norm = torch.norm(
-            torch.stack(grad_norms),
-            p=2,
-        )
-        return norm

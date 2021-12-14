@@ -12,7 +12,10 @@ from sklearn.decomposition import PCA
 
 from grok.training import TrainableTransformer
 
-ckpt_dir = "./openai_grok-scripts/16k7awpi/checkpoints"
+# ckpt_dir = "./openai_grok-scripts/e62ioupl/checkpoints"
+# ckpt_dir = "./openai_grok-scripts/3gpmnogc/checkpoints"
+# ckpt_dir = "./openai_grok-scripts/cyss152e/checkpoints"
+ckpt_dir = "./openai_grok-scripts/1co466b4/checkpoints"
 model_path = os.path.join(ckpt_dir, next(os.walk(ckpt_dir))[-1][0])
 print(model_path)
 # model_path = './checkpoints/epoch_512.ckpt'
@@ -21,13 +24,13 @@ model = TrainableTransformer.load_from_checkpoint(model_path)
 
 data = model.transformer.linear.weight.data.cpu().numpy()[22:119] # not sure if this should be 23:120 instead
 
-mods = [4,6,8,9,10]
+mods = list(range(2,30))
 colors = [np.arange(data.shape[0]) % i for i in mods]
 
 # print(colors)
 
 # perform t-SNE
-model = TSNE(n_components=2, perplexity=80, learning_rate=200, verbose=True)
+model = TSNE(n_components=2, perplexity=30, learning_rate=200, verbose=True)
 # model = PCA(n_components=2)
 transformed_data = model.fit_transform(data / np.linalg.norm(data, ord=1, axis=1, keepdims=True))
 
@@ -51,3 +54,4 @@ for m, color in zip(mods, colors):
         else:
             plt.plot([transformed_data[order][-1,0], transformed_data[order][0,0]], [transformed_data[order][i,1], transformed_data[order][0,1]], alpha=0.3, c='grey')
     plt.savefig(f"tSNE_weights_mod_{m}.png")
+    plt.close()
