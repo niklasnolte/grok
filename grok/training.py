@@ -3,7 +3,6 @@
 import os
 import pickle
 from argparse import ArgumentParser, Namespace
-from functools import reduce
 from typing import Any, Dict, List, Tuple
 import time
 
@@ -704,8 +703,11 @@ def train(hparams: Namespace) -> None:
 
     torch.save(model, os.path.join(checkpoint_path, "init.pt"))
 
-    logger = TensorBoardLogger(hparams.logdir)
-
+    if not hparams.no_log:
+      logger = TensorBoardLogger(hparams.logdir)
+    else:
+      logger = None
+    
     # checkpointer = ModelCheckpoint(
     #     filepath=checkpoint_path,
     #     monitor="save_ckpt",
@@ -753,85 +755,6 @@ def train(hparams: Namespace) -> None:
     return hparams.logdir
 
 
-def compute_sharpness(hparams: Namespace, ckpts) -> None:
-    """
-    This is the compute_sharpness method. This loads a series of checkpoints in
-    the defined hyperparameters
-
-    :param hparams: An argparse.Namespace with all of the relevant hyperparameters
-    """
-
-    # Process the args
-    if hparams.logdir is None:
-        hparams.logdir = os.environ.get("LOGDIR", ".")
-    hparams.logdir = os.path.abspath(hparams.logdir)
-
-    # Make sure d_model, heads, and d_key are compatible
-    assert (
-        hparams.d_model % hparams.n_heads == 0
-    ), "n_heads=%s does not evenly divide d_model=%s" % (
-        hparams.n_heads,
-        hparams.d_model,
-    )
-    hparams.d_key = hparams.d_model / hparams.n_heads
-
-    # Set up the RNGs for repeatability
-    if hparams.random_seed != -1:
-        torch.manual_seed(hparams.random_seed)
-        torch.cuda.manual_seed(hparams.random_seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-    checkpoint_path = hparams.logdir + "/checkpoints"
-    os.makedirs(checkpoint_path, exist_ok=True)
-    hparams.checkpoint_path = checkpoint_path
-
-    # Create the model
-    model = TrainableTransformer(**vars(hparams)).float()
-
-    torch.save(model, os.path.join(checkpoint_path, "init.pt"))
-
-    logger = WandbLogger(hparams.logdir)
-
-
-    trainer_args = {
-        "max_steps": hparams.max_steps,
-        "min_steps": hparams.max_steps,
-        "max_epochs": hparams.max_epochs,
-        "val_check_interval": 1,
-        "profiler": False,
-        # "checkpoint_callback": checkpointer,
-        "logger": logger,
-        "log_every_n_steps": 1,
-        "flush_logs_every_n_steps": 1000,
-    }
-    if torch.cuda.is_available() and hparams.gpu >= 0:
-        trainer_args["gpus"] = [hparams.gpu]
-
-    trainer = Trainer(**trainer_args)
-
-    for ckpt in ckpts:
-        print(f"Loading checkpoint {ckpt}")
-        # model = torch.load(ckpt)
-        # model.load_state_dict(torch.load(ckpt))
-
-        checkpoint = torch.load(ckpt)
-        # print(dir(checkpoint), type(checkpoint), "Ckpt")
-        # for k, v in checkpoint.items():
-        #     print(k)
-        # print(checkpoint["hyper_parameters"])
-
-        hps = checkpoint["hyper_parameters"]
-        # hps = argparse.Namespace(**hps)
-        model = TrainableTransformer(**hps).float()
-        model.load_state_dict(checkpoint["state_dict"])
-
-        phi = get_sharpness(model.train_dataloader(), model)
-        results = {}
-        results[ckpt] = phi
-        pickle.dump(results, open(f"results/results_SD-{i}.pkl", "wb"))
-
-
 def add_args(parser=None) -> Namespace:
     """
     Parses the command line arguments
@@ -842,8 +765,10 @@ def add_args(parser=None) -> Namespace:
         parser = ArgumentParser()
     parser.add_argument("--random_seed", type=int, default=-1)
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--max_epochs", type=int, default=100000)
+    parser.add_argument("--max_epochs", type=int, default=50000)
     parser.add_argument("--max_steps", type=int, default=1000000)
+    parser.add_argument("--no_log", action="store_true")
+    parser.set_defaults(no_log=False)
     # parser.add_argument("--checkpoint_period", type=int, default=1)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser
