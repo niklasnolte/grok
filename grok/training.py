@@ -1,34 +1,22 @@
 #!/usr/bin/env python
 
-import argparse
-import copy
-import json
-import logging
-import math
 import os
-import sys
 import pickle
 from argparse import ArgumentParser, Namespace
 from functools import reduce
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple
 import time
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.callbacks import Callback, ModelCheckpoint
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
-from torch.optim import AdamW
-import wandb
 
-import grok.metrics as metrics
 from grok.data import (
     DEFAULT_DATA_DIR,
-    EOS_TOKEN,
-    VALID_OPERATORS,
     ArithmeticDataset,
     ArithmeticIterator,
 )
@@ -102,12 +90,13 @@ class TrainableTransformer(LightningModule):
             help="for list operations, the length of the lists",
         )
 
-        parser.add_argument("--train_data_pct", type=float, default=5)
+        parser.add_argument("--train_data_pct", type=float, default=50)
         parser.add_argument("--warmup_steps", type=int, default=10)
         parser.add_argument("--anneal_lr_steps", type=int, default=100000)
         parser.add_argument("--anneal_lr", dest="anneal_lr", action="store_true")
         parser.set_defaults(anneal_lr=False)
 
+        parser.add_argument("--optimizer", type=str, default="adamw")
         parser.add_argument("--max_lr", type=float, default=1e-3)
         parser.add_argument("--weight_decay", type=float, default=0)
         parser.add_argument("--weight_decay_kind", type=str, default="to_zero")
@@ -223,13 +212,26 @@ class TrainableTransformer(LightningModule):
 
         :returns: optimizers and schedulers.
         """
-        optimizer = AdamW(
-            self.parameters(),
-            weight_decay=self.hparams.weight_decay,
-            lr=1,
-            betas=(0.9, 0.98),
-            eps=1e-8
-        )
+        optim_str = self.hparams.optimizer.lower()
+
+        if optim_str in ["adamw", "adam"]:
+          optim_fn = torch.optim.AdamW if optim_str == "adamw" else torch.optim.Adam
+          optimizer = optim_fn(
+              self.parameters(),
+              lr=1, # this is multiplied by the output of by _scheduler_lr
+              weight_decay=self.hparams.weight_decay,
+              betas=(0.9, 0.98),
+              eps=1e-8
+          )
+        elif optim_str == "sgd":
+          optimizer = torch.optim.SGD(
+              self.parameters(),
+              lr=1, # this is multiplied by the output of by _scheduler_lr
+              weight_decay=self.hparams.weight_decay,
+              momentum=0.9
+          )
+        else:
+          raise ValueError(f"Unknown optimizer {self.hparams.optimizer}")
 
         schedulers = [
             {
@@ -448,10 +450,10 @@ class TrainableTransformer(LightningModule):
         lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
         output = {
             "loss": loss,
-            "partial_train_loss": coeff * loss,
-            "partial_train_accuracy": coeff * accuracy,
-            "learning_rate": torch.tensor([lr]),
-            "y_hat_rhs": y_hat_rhs,
+            "partial_train_loss": (coeff * loss).detach(),
+            "partial_train_accuracy": (coeff * accuracy).detach(),
+            "learning_rate": torch.tensor([lr]).detach(),
+            "y_hat_rhs": y_hat_rhs.detach(),
             "partial_attentions": attentions,
             "partial_values": values,
         }
@@ -702,8 +704,7 @@ def train(hparams: Namespace) -> None:
 
     torch.save(model, os.path.join(checkpoint_path, "init.pt"))
 
-    # logger = CSVLogger(hparams.logdir)
-    logger = WandbLogger(hparams.logdir)
+    logger = TensorBoardLogger(hparams.logdir)
 
     # checkpointer = ModelCheckpoint(
     #     filepath=checkpoint_path,
@@ -716,7 +717,7 @@ def train(hparams: Namespace) -> None:
     trainer_args = {
         "max_steps": hparams.max_steps,
         "min_steps": hparams.max_steps,
-        "max_epochs": int(1e8),
+        "max_epochs": hparams.max_epochs,
         # "val_check_interval": 1.0,
         "profiler": False,
         # "checkpoint_callback": checkpointer,
@@ -790,13 +791,13 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
 
     torch.save(model, os.path.join(checkpoint_path, "init.pt"))
 
-    logger = CSVLogger(hparams.logdir)
+    logger = WandbLogger(hparams.logdir)
 
 
     trainer_args = {
         "max_steps": hparams.max_steps,
         "min_steps": hparams.max_steps,
-        "max_epochs": int(1e8),
+        "max_epochs": hparams.max_epochs,
         "val_check_interval": 1,
         "profiler": False,
         # "checkpoint_callback": checkpointer,
@@ -841,8 +842,8 @@ def add_args(parser=None) -> Namespace:
         parser = ArgumentParser()
     parser.add_argument("--random_seed", type=int, default=-1)
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--max_epochs", type=int, default=None)
-    parser.add_argument("--max_steps", type=int, default=100000)
+    parser.add_argument("--max_epochs", type=int, default=100000)
+    parser.add_argument("--max_steps", type=int, default=1000000)
     # parser.add_argument("--checkpoint_period", type=int, default=1)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser
