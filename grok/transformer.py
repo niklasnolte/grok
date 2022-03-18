@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-from argparse import ArgumentParser, Namespace
 from typing import Tuple, List, Dict, Union
 
 import numpy as np
@@ -8,8 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from numpy import cos, sin, sqrt
 from torch import tensor, Tensor
-from torch.optim.lr_scheduler import LambdaLR
-import pytorch_lightning as pl
 
 from argparse import ArgumentParser
 

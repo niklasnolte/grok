@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import os
-import pickle
 from argparse import ArgumentParser, Namespace
 from typing import Any, Dict, List, Tuple
 import time
@@ -96,7 +95,10 @@ class TrainableTransformer(LightningModule):
         parser.set_defaults(anneal_lr=False)
 
         parser.add_argument("--optimizer", type=str, default="adamw")
-        parser.add_argument("--max_lr", type=float, default=1e-3)
+        parser.add_argument("--lr_multiplier", type=float, default=1e-3)
+        parser.add_argument("--decoder_lr", type=float, default=1)
+        parser.add_argument("--embedding_lr", type=float, default=1)
+        parser.add_argument("--linear_lr", type=float, default=1)
         parser.add_argument("--weight_decay", type=float, default=0)
         parser.add_argument("--weight_decay_kind", type=str, default="to_zero")
         parser.add_argument("--noise_factor", type=float, default=0)
@@ -184,8 +186,8 @@ class TrainableTransformer(LightningModule):
 
         :returns: the learning_rate for this training step
         """
-        max_lr = self.hparams.max_lr  # type: ignore
-        min_lr = self.hparams.max_lr / 10  # type: ignore
+        max_lr = self.hparams.lr_multiplier  # type: ignore
+        min_lr = self.hparams.lr_multiplier / 10  # type: ignore
         warmup_steps = self.hparams.warmup_steps  # type: ignore
         if not self.hparams.anneal_lr:
             if step <= warmup_steps:
@@ -200,7 +202,6 @@ class TrainableTransformer(LightningModule):
                 t = effective_step / self.hparams.anneal_lr_steps
                 cos = (1 + np.cos(np.pi * t)) / 2
                 lr = min_lr + (max_lr - min_lr) * cos
-                # lr = max_lr - ((effective_step / max_effective_step) * (max_lr - min_lr))
             else:
                 lr = min_lr
         return lr
@@ -213,25 +214,24 @@ class TrainableTransformer(LightningModule):
         """
         optim_str = self.hparams.optimizer.lower()
 
-        if optim_str in ["adamw", "adam"]:
+        optim_args = dict(weight_decay = self.hparams.weight_decay)
+        if optim_str in ["adam", "adamw"]:
           optim_fn = torch.optim.AdamW if optim_str == "adamw" else torch.optim.Adam
-          optimizer = optim_fn(
-              self.parameters(),
-              lr=1, # this is multiplied by the output of by _scheduler_lr
-              weight_decay=self.hparams.weight_decay,
-              betas=(0.9, 0.98),
-              eps=1e-8
-          )
+          optim_args["betas"] = (0.9, 0.999)
+          optim_args["eps"] = 1e-8
         elif optim_str == "sgd":
-          optimizer = torch.optim.SGD(
-              self.parameters(),
-              lr=1, # this is multiplied by the output of by _scheduler_lr
-              weight_decay=self.hparams.weight_decay,
-              momentum=0.9
-          )
+          optim_fn = torch.optim.SGD
+          optim_args["momentum"] = 0.9
         else:
           raise ValueError(f"Unknown optimizer {self.hparams.optimizer}")
 
+        param_groups = [
+          dict(params=self.transformer.decoder.parameters(), lr=self.hparams.decoder_lr),
+          dict(params=self.transformer.embedding.parameters(), lr=self.hparams.embedding_lr),
+          dict(params=self.transformer.linear.parameters(), lr=self.hparams.linear_lr),
+        ]
+
+        optimizer = optim_fn(param_groups, **optim_args)
         schedulers = [
             {
                 "scheduler": LambdaLR(optimizer, lr_lambda=self._scheduler_lr),
@@ -446,12 +446,16 @@ class TrainableTransformer(LightningModule):
         schedulers = self.trainer.lr_schedulers[0]
         # if self.current_epoch != self.next_train_epoch_to_log:
             # return {"loss": loss}
-        lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
+        lr_decoder = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
+        lr_embedding = schedulers["scheduler"].optimizer.param_groups[1]["lr"]
+        lr_linear = schedulers["scheduler"].optimizer.param_groups[2]["lr"]
         output = {
             "loss": loss,
             "partial_train_loss": (coeff * loss).detach(),
             "partial_train_accuracy": (coeff * accuracy).detach(),
-            "learning_rate": torch.tensor([lr]).detach(),
+            "lr_decoder": torch.tensor([lr_decoder]).detach(),
+            "lr_embedding": torch.tensor([lr_embedding]).detach(),
+            "lr_linear": torch.tensor([lr_linear]).detach(),
             "y_hat_rhs": y_hat_rhs.detach(),
             "partial_attentions": attentions,
             "partial_values": values,
@@ -488,10 +492,6 @@ class TrainableTransformer(LightningModule):
             accuracy = torch.stack(
                 [x["partial_train_accuracy"] for x in outputs]
             ).sum()
-        # avg_lr = torch.stack([x["learning_rate"] for x in outputs]).mean()
-        # max_lr = torch.stack([x["learning_rate"] for x in outputs]).max()
-        # last_lr = outputs[-1]["learning_rate"]
-        first_lr = outputs[0]["learning_rate"]
 
         if self.hparams.save_activations or self.hparams.save_outputs:
             if self.current_epoch == 0:
@@ -502,7 +502,9 @@ class TrainableTransformer(LightningModule):
             "train_loss": loss,
             "train_accuracy": accuracy,
             "train_perplexity": perplexity,
-            "learning_rate": first_lr,
+            "lr_decoder": outputs[0]["lr_decoder"],
+            "lr_embedding": outputs[0]["lr_embedding"],
+            "lr_linear": outputs[0]["lr_linear"],
             "len_train_ds": len(self.train_dataset),
             "len_val_ds": len(self.val_dataset),
             "batches_per_epoch": self.batches_per_epoch,
@@ -765,7 +767,7 @@ def add_args(parser=None) -> Namespace:
         parser = ArgumentParser()
     parser.add_argument("--random_seed", type=int, default=-1)
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--max_epochs", type=int, default=50000)
+    parser.add_argument("--max_epochs", type=int, default=20000)
     parser.add_argument("--max_steps", type=int, default=1000000)
     parser.add_argument("--no_log", action="store_true")
     parser.set_defaults(no_log=False)
