@@ -19,7 +19,6 @@ from grok.data import (
     ArithmeticIterator,
 )
 from grok.transformer import Transformer
-from grok.measure import get_sharpness
 
 DEFAULT_LOG_DIR = "logs"
 
@@ -48,11 +47,11 @@ class TrainableTransformer(LightningModule):
             len(self.train_dataset.tokenizer),
             self.hparams.non_linearity,
             weight_noise=self.hparams.weight_noise,
-        )
+        ).to(self.device)
 
-        self.margin = torch.Tensor([0])
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
+        self.grad_norms = dict()
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -102,6 +101,24 @@ class TrainableTransformer(LightningModule):
         parser.add_argument("--weight_decay", type=float, default=0)
         parser.add_argument("--weight_decay_kind", type=str, default="to_zero")
         parser.add_argument("--noise_factor", type=float, default=0)
+        parser.add_argument(
+            "--beta1",
+            type=float,
+            default=0.9,
+            help="Adam beta1, not used when choosing sgd",
+        )
+        parser.add_argument(
+            "--beta2",
+            type=float,
+            default=0.999,
+            help="Adam beta2, not used when choosing sgd",
+        )
+        parser.add_argument(
+            "--amsgrad",
+            action="store_true",
+            help="Adam amsgrad, not used when choosing sgd",
+        )
+        parser.set_defaults(amsgrad=False)
 
         parser.add_argument(
             "--save_activations", dest="save_activations", action="store_true"
@@ -111,14 +128,10 @@ class TrainableTransformer(LightningModule):
         parser.set_defaults(save_outputs=False)
 
         parser.add_argument(
-            "--logdir",
-            type=str,
-            default=DEFAULT_LOG_DIR,
+            "--logdir", type=str, default=DEFAULT_LOG_DIR,
         )
         parser.add_argument(
-            "--datadir",
-            type=str,
-            default=DEFAULT_DATA_DIR,
+            "--datadir", type=str, default=DEFAULT_DATA_DIR,
         )
 
         return parser
@@ -135,6 +148,7 @@ class TrainableTransformer(LightningModule):
             operator=self.hparams.math_operator,  # type: ignore
             operand_length=self.hparams.operand_length,  # type: ignore
             data_dir=self.hparams.datadir,  # type: ignore
+            device=self.device,
         )
 
     def train_dataloader(self) -> ArithmeticIterator:  # type: ignore
@@ -143,11 +157,8 @@ class TrainableTransformer(LightningModule):
 
         :returns: an iterator for self.train_dataset
         """
-        device = self.transformer.embedding.weight.device
         iterator = ArithmeticIterator(
-            self.train_dataset,
-            device,
-            batchsize_hint=self.hparams.batchsize,  # type: ignore
+            self.train_dataset, batchsize_hint=self.hparams.batchsize,  # type: ignore
         )
         self.train_batchsize = iterator.batchsize
         self.batches_per_epoch = len(iterator)
@@ -160,11 +171,8 @@ class TrainableTransformer(LightningModule):
 
         :returns: an iterator for self.train_dataset
         """
-        device = self.transformer.embedding.weight.device
         iterator = ArithmeticIterator(
-            self.val_dataset,
-            device,
-            batchsize_hint=-1,  # no need to batch validation data
+            self.val_dataset, batchsize_hint=-1,  # no need to batch validation data
         )
         return iterator
 
@@ -174,7 +182,6 @@ class TrainableTransformer(LightningModule):
 
         :returns: an iterator for self.train_dataset
         """
-        device = self.transformer.embedding.weight.device
         iterator = ArithmeticIterator(
             self.val_dataset, device, batchsize_hint=-1  # type: ignore
         )
@@ -187,6 +194,7 @@ class TrainableTransformer(LightningModule):
         :returns: the learning_rate for this training step
         """
         max_lr = self.hparams.lr_multiplier  # type: ignore
+        return max_lr
         min_lr = self.hparams.lr_multiplier / 10  # type: ignore
         warmup_steps = self.hparams.warmup_steps  # type: ignore
         if not self.hparams.anneal_lr:
@@ -214,21 +222,33 @@ class TrainableTransformer(LightningModule):
         """
         optim_str = self.hparams.optimizer.lower()
 
-        optim_args = dict(weight_decay = self.hparams.weight_decay)
+        optim_args = dict()
         if optim_str in ["adam", "adamw"]:
-          optim_fn = torch.optim.AdamW if optim_str == "adamw" else torch.optim.Adam
-          optim_args["betas"] = (0.9, 0.999)
-          optim_args["eps"] = 1e-8
+            optim_fn = torch.optim.AdamW if optim_str == "adamw" else torch.optim.Adam
+            optim_args["betas"] = (self.hparams.beta1, self.hparams.beta2)
+            optim_args["eps"] = 1e-8
+            optim_args["amsgrad"] = self.hparams.amsgrad
         elif optim_str == "sgd":
-          optim_fn = torch.optim.SGD
-          optim_args["momentum"] = 0.9
+            optim_fn = torch.optim.SGD
+            optim_args["momentum"] = 0.9
         else:
-          raise ValueError(f"Unknown optimizer {self.hparams.optimizer}")
+            raise ValueError(f"Unknown optimizer {self.hparams.optimizer}")
 
         param_groups = [
-          dict(params=self.transformer.decoder.parameters(), lr=self.hparams.decoder_lr),
-          dict(params=self.transformer.embedding.parameters(), lr=self.hparams.embedding_lr),
-          dict(params=self.transformer.linear.parameters(), lr=self.hparams.linear_lr),
+            dict(
+                params=self.transformer.decoder.parameters(),
+                lr=self.hparams.decoder_lr,
+                weight_decay=self.hparams.weight_decay,
+            ),
+            dict(
+                params=self.transformer.embedding.parameters(),
+                lr=self.hparams.embedding_lr,
+            ),
+            dict(
+                params=self.transformer.linear.parameters(),
+                lr=self.hparams.linear_lr,
+                weight_decay=self.hparams.weight_decay,
+            ),
         ]
 
         optimizer = optim_fn(param_groups, **optim_args)
@@ -258,6 +278,13 @@ class TrainableTransformer(LightningModule):
         row_accuracy = torch.min((y_hat == y), dim=-1).values  # shape: batchsize
         accuracy = row_accuracy.float() * 100  # shape: batchsize
         return accuracy
+
+    def on_after_backward(self) -> None:
+        """ record gradients """
+        for name, param in self.named_parameters():
+            self.grad_norms["gradnorm_" + name] = torch.norm(param.grad, p=2).item()
+
+        return super().on_after_backward()
 
     def _step(
         self,
@@ -311,43 +338,7 @@ class TrainableTransformer(LightningModule):
             if reduction == "mean":
                 acc = acc.mean()
 
-        """
-        device = self.transformer.embedding.weight.device
-        self.margin = self.margin.to(device)
-
-        output = y_hat_rhs.clone()  # batchsize, vocabsize, rhs tokens
-        output_m = output.clone()  # batchsize, vocabsize, rhs tokens
-        target = y_rhs.clone()  # batchsize, rhs tokens
-
-        for i in range(output.size(0)):  # batch
-            for j in range(output.size(2)):  # rhs tokens
-                output_m[i, target[i, j], j] = output_m[i, :, j].min()
-
-        for i in range(output.size(2)):  # rhs tokens
-            output_compressed = output[:, target[:, i], i].squeeze().diag()
-            output_m_compressed = (
-                output_m[:, output_m.max(dim=1).indices[:, i], i].squeeze().diag()
-            )
-            self.margin = torch.cat(
-                (
-                    self.margin,
-                    (output_compressed - output_m_compressed),
-                ),
-                0,
-            )
-        """
-        grad_vec = None
-        if grads:
-            loss.backward()
-            for p in self.parameters():
-                p.grad.data.div_(batch["text"].shape[0])
-                if grad_vec is None:
-                    grad_vec = p.grad.data.view(-1)
-                else:
-                    grad_vec = torch.cat((grad_vec, p.grad.data.view(-1)))
-            return loss, grad_vec
         return loss, acc, coeff, x_lhs, y_hat_rhs, attentions, values
-
 
     def _save_inputs(self, outputs: Dict, ds: str) -> None:
         """
@@ -445,10 +436,11 @@ class TrainableTransformer(LightningModule):
 
         schedulers = self.trainer.lr_schedulers[0]
         # if self.current_epoch != self.next_train_epoch_to_log:
-            # return {"loss": loss}
+        # return {"loss": loss}
         lr_decoder = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
         lr_embedding = schedulers["scheduler"].optimizer.param_groups[1]["lr"]
         lr_linear = schedulers["scheduler"].optimizer.param_groups[2]["lr"]
+        print(loss)
         output = {
             "loss": loss,
             "partial_train_loss": (coeff * loss).detach(),
@@ -482,16 +474,8 @@ class TrainableTransformer(LightningModule):
         #         self.next_train_epoch_to_log + 1,
         #     )
         with torch.no_grad():
-            try:
-                loss = torch.stack([x["partial_train_loss"] for x in outputs]).sum()
-            except Exception as e:
-                print("!" * 80)
-                print(outputs)
-                raise e
-            perplexity = torch.exp(loss)
-            accuracy = torch.stack(
-                [x["partial_train_accuracy"] for x in outputs]
-            ).sum()
+            loss = torch.stack([x["partial_train_loss"] for x in outputs]).sum()
+            accuracy = torch.stack([x["partial_train_accuracy"] for x in outputs]).sum()
 
         if self.hparams.save_activations or self.hparams.save_outputs:
             if self.current_epoch == 0:
@@ -501,18 +485,15 @@ class TrainableTransformer(LightningModule):
         logs = {
             "train_loss": loss,
             "train_accuracy": accuracy,
-            "train_perplexity": perplexity,
             "lr_decoder": outputs[0]["lr_decoder"],
             "lr_embedding": outputs[0]["lr_embedding"],
             "lr_linear": outputs[0]["lr_linear"],
-            "len_train_ds": len(self.train_dataset),
-            "len_val_ds": len(self.val_dataset),
             "batches_per_epoch": self.batches_per_epoch,
             "time_per_epoch": time.time() - self.training_epoch_start_time,
             "fwd_time_in_epoch": self.fwd_time_in_epoch,
         }
-        for k, v in logs.items():
-            self.log(k, v)
+        self.log_dict(logs)
+        self.log_dict(self.grad_norms)
 
     def validation_step(self, batch, batch_idx):
         """
@@ -552,19 +533,18 @@ class TrainableTransformer(LightningModule):
         :param batch_idx: which batch this is in the epoch.
         :returns: a dict with val_loss, val_accuracy
         """
-        
+
         # validation_is_real = len(outputs[0]) != 0 # raises an error if validation_step returns {}
         validation_is_real = len(outputs) != 0
         if validation_is_real:
             validation_is_real = len(outputs[0]) != 0
 
         # if validation_is_real:
-            # self.next_epoch_to_eval = max(
-            #     int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
-            # )
+        # self.next_epoch_to_eval = max(
+        #     int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
+        # )
         if validation_is_real:
             loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
-            perplexity = torch.exp(loss)
             accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
 
             if self.hparams.save_activations or self.hparams.save_outputs:
@@ -575,7 +555,6 @@ class TrainableTransformer(LightningModule):
             logs = {
                 "val_loss": loss,
                 "val_accuracy": accuracy,
-                "val_perplexity": perplexity,
             }
             print(f"\nStep = {self.global_step}")
             print(f"val_loss = {loss}")
@@ -597,8 +576,7 @@ class TrainableTransformer(LightningModule):
                 logs["full_train_loss"] = tr_loss
                 logs["full_train_acc"] = tr_acc
 
-            for k, v in logs.items():
-                self.log(k, v)
+            self.log_dict(logs)
             # save a checkpoint if the epoch is a power of 2
             if (
                 self.current_epoch > 0
@@ -611,8 +589,6 @@ class TrainableTransformer(LightningModule):
                         "epoch_" + str(self.current_epoch) + ".ckpt",
                     )
                 )
-            # if validation_is_real:
-            return logs
 
     def test_step(self, batch, batch_idx):
         """
@@ -651,13 +627,11 @@ class TrainableTransformer(LightningModule):
         """
         loss = torch.cat([x["partial_test_loss"] for x in outputs], dim=0)  # .sum()
         # loss = list([x["partial_test_loss"] for x in outputs])  # .sum()
-        perplexity = torch.exp(loss)
         accuracy = torch.cat([x["partial_test_accuracy"] for x in outputs], dim=0)
 
         logs = {
             "test_loss": loss,
             "test_accuracy": accuracy,
-            "test_perplexity": perplexity,
         }
 
         return {"test_loss": loss, "log": logs}
@@ -681,11 +655,9 @@ def train(hparams: Namespace) -> None:
     hparams.logdir = os.path.abspath(hparams.logdir)
 
     # Make sure d_model, heads, and d_key are compatible
-    assert (
-        hparams.d_model % hparams.n_heads == 0
-    ), "n_heads=%s does not evenly divide d_model=%s" % (
-        hparams.n_heads,
-        hparams.d_model,
+    assert hparams.d_model % hparams.n_heads == 0, (
+        "n_heads=%s does not evenly divide d_model=%s"
+        % (hparams.n_heads, hparams.d_model,)
     )
     hparams.d_key = hparams.d_model / hparams.n_heads
 
@@ -701,15 +673,16 @@ def train(hparams: Namespace) -> None:
     hparams.checkpoint_path = checkpoint_path
 
     # Create the model
-    model = TrainableTransformer(**vars(hparams)).float()
+    device = torch.device(f"cuda:{hparams.gpu}" if torch.cuda.is_available() else "cpu")
+    model = TrainableTransformer(**vars(hparams)).float().to(device)
 
     torch.save(model, os.path.join(checkpoint_path, "init.pt"))
 
     if not hparams.no_log:
-      logger = TensorBoardLogger(hparams.logdir)
+        logger = TensorBoardLogger(hparams.logdir)
     else:
-      logger = None
-    
+        logger = None
+
     # checkpointer = ModelCheckpoint(
     #     filepath=checkpoint_path,
     #     monitor="save_ckpt",
@@ -735,25 +708,6 @@ def train(hparams: Namespace) -> None:
     trainer = Trainer(**trainer_args)
 
     trainer.fit(model=model)  # type: ignore
-    """
-    margin = np.percentile(model.margin.detach().cpu().numpy(), 5)
-    device = transformer.embedding.weight.device
-    measures, bounds = metrics.calculate(
-        transformer,
-        transformer_init.to(device),
-        device,
-        dataset_size,
-        margin,
-        input_dim=hparams.d_model,
-    )
-
-    measures_file = os.path.join(logger.log_dir, "measures.json")
-    bounds_file = os.path.join(logger.log_dir, "bounds.json")
-    with open(measures_file, "w") as fh:
-        json.dump(measures, fh)
-    with open(bounds_file, "w") as fh:
-        json.dump(bounds, fh)
-    """
     return hparams.logdir
 
 

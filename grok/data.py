@@ -142,6 +142,7 @@ class ArithmeticDataset:
         operator: str,
         operand_length: Optional[int] = None,
         data_dir: str = DEFAULT_DATA_DIR,
+        device: torch.device = torch.device("cpu"),
     ):
         """
         Creates training and validation datasets
@@ -159,8 +160,8 @@ class ArithmeticDataset:
 
         train_rows, _ = cls.calc_split_len(train_pct, len(eqs))
 
-        train_ds = cls(ds_name, eqs[:train_rows], train=True, data_dir=data_dir)
-        val_ds = cls(ds_name, eqs[train_rows:], train=False, data_dir=data_dir)
+        train_ds = cls(ds_name, eqs[:train_rows], train=True, data_dir=data_dir, device=device)
+        val_ds = cls(ds_name, eqs[train_rows:], train=False, data_dir=data_dir, device=device)
 
         return train_ds, val_ds
 
@@ -170,7 +171,7 @@ class ArithmeticDataset:
         val_rows = ds_len - train_rows
         return train_rows, val_rows
 
-    def __init__(self, name, data: Union[Tensor, List[str]], train, data_dir) -> None:
+    def __init__(self, name, data: Union[Tensor, List[str]], train, data_dir, device) -> None:
         """
         :param data: A list of equations strings. Each equation must have an '=' in it.
         """
@@ -178,9 +179,9 @@ class ArithmeticDataset:
         self.name = name
         self.train = train
         if isinstance(data, list):
-            self.data = self.tokenizer.encode(data)
+            self.data = self.tokenizer.encode(data).to(device)
         else:
-            self.data = data
+            self.data = data.to(device)
 
     def __len__(self) -> int:
         """
@@ -394,7 +395,6 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
     def __init__(
         self,
         dataset: ArithmeticDataset,
-        device: torch.device,
         batchsize_hint: float = 0,
         shuffle: bool = True,
     ) -> None:
@@ -412,7 +412,6 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
         self.batchsize = self.calculate_batchsize(
             len(dataset), batchsize_hint=batchsize_hint
         )
-        self.device = device
         self.reset_iteration(shuffle=shuffle)
 
     @staticmethod
@@ -468,7 +467,7 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
         indices = self.permutation[batch_begin : batch_begin + self.batchsize]
         text = self.dataset.data[indices, :-1]
         target = self.dataset.data[indices, 1:]
-        batch = {"text": text.to(self.device), "target": target.to(self.device)}
+        batch = {"text": text, "target": target}
         self.index += 1
         return batch
 
