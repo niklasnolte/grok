@@ -1,13 +1,10 @@
 import itertools
 import math
-import os
-import sys
-import random
 
 import torch
 from torch import Tensor, LongTensor
 import numpy as np
-from typing import Tuple, List, Dict, Any, Union, Optional
+from typing import List, Dict, Union, Optional
 from tqdm import tqdm
 
 from sympy.combinatorics.permutations import Permutation
@@ -40,7 +37,7 @@ VALID_OPERATORS = {
 }
 EOS_TOKEN = "<|eos|>"
 EQ_TOKEN = "="
-MODULUS = 97
+MODULUS = 41
 NUMS = list(range(MODULUS))
 
 DEFAULT_DATA_DIR = "data"
@@ -160,8 +157,12 @@ class ArithmeticDataset:
 
         train_rows, _ = cls.calc_split_len(train_pct, len(eqs))
 
-        train_ds = cls(ds_name, eqs[:train_rows], train=True, data_dir=data_dir, device=device)
-        val_ds = cls(ds_name, eqs[train_rows:], train=False, data_dir=data_dir, device=device)
+        train_ds = cls(
+            ds_name, eqs[:train_rows], train=True, data_dir=data_dir, device=device
+        )
+        val_ds = cls(
+            ds_name, eqs[train_rows:], train=False, data_dir=data_dir, device=device
+        )
 
         return train_ds, val_ds
 
@@ -171,7 +172,9 @@ class ArithmeticDataset:
         val_rows = ds_len - train_rows
         return train_rows, val_rows
 
-    def __init__(self, name, data: Union[Tensor, List[str]], train, data_dir, device) -> None:
+    def __init__(
+        self, name, data: Union[Tensor, List[str]], train, data_dir, device
+    ) -> None:
         """
         :param data: A list of equations strings. Each equation must have an '=' in it.
         """
@@ -188,14 +191,6 @@ class ArithmeticDataset:
         :returns: total number of equations in this dataset
         """
         return self.data.shape[0]
-
-    # @classmethod
-    # def _render(cls, operand):
-    #    return render(operand, join_str=" ")
-    #
-    # @classmethod
-    # def _render_eq(parts):
-    #    return " ".join(map(render, parts))
 
     @classmethod
     def _make_binary_operation_data(cls, operator: str, operands=None) -> List[str]:
@@ -215,9 +210,6 @@ class ArithmeticDataset:
             operands = operands or NUMS
             tuples = itertools.product(operands, repeat=2)
 
-        # if operator == "s5":
-        #     print("elems", list(elems))
-        #     print("tuples", list(tuples))
         eqs = []
         for a, b in tuples:
             if operator == "/":
@@ -251,13 +243,7 @@ class ArithmeticDataset:
             eq = " ".join(map(render, [a, operator, b, "=", c]))
             eqs.append(eq)
 
-        # if operator == "s5":
-        #     print("eqs", eqs)
         return eqs
-
-    # @staticmethod
-    # def _render_unop_example(operator, lhs, rhs):
-    #    return " ".join([operator, render(lhs), "=", render(rhs)])
 
     @staticmethod
     def _make_unary_operation_data(operator: str, operands: Tensor) -> List[str]:
@@ -288,26 +274,8 @@ class ArithmeticDataset:
                     zip(operands.tolist(), rhs.tolist()), total=num_examples
                 )
             ]
-        else:
-            with ProcessPoolExecutor() as executor:
-                eqs = executor.map(func, tqdm(zip(operands, rhs), total=num_examples))
 
         return eqs
-
-    # @staticmethod
-    # def _make_s5_data(abstract=False) -> List[str]:
-    #    elems = itertools.permutations([0, 1, 2, 3, 4])
-    #    pairs = itertools.product(elems, repeat=2)
-    #    eqs = []
-    #    for a, b in pairs:
-    #        a = np.array(a)
-    #        b = np.array(b)
-    #        c = b[a]
-    #        eq = " ".join(map(render, (a, "s5", b, "=", c)))
-    #        eq = cls._render_eq([a, , b, "=", c])
-    #        eqs.append(eq)
-    #
-    #    return eqs
 
     @classmethod
     def get_dsname(cls, operator, operand_length) -> str:
@@ -359,30 +327,12 @@ class ArithmeticDataset:
 
         return data
 
-    # @classmethod
-    # def create_data_file(
-    #    cls, operator, operand_length=None, shuffle=True, data_dir=DEFAULT_DATA_DIR
-    # ):
-    #    if VALID_OPERATORS[operator]["binary_eval"]:
-    #        cls.write_dataset(
-    #            cls.make_binary_operation_data(operator), paths["ds_file"]
-    #        )
-    #
-    #    pass
-
-    # @classmethod
-    # def write_dataset(eqs: List[str], ds_file: str):
-    #    print(f"-> writing {ds_file}", flush=True)
-    #    with open(ds_file, "w") as fh:
-    #        fh.writelines([EOS_TOKEN + " " + eq + " " + EOS_TOKEN + "\n" for eq in eqs])
-
     @classmethod
     def _make_lists(cls, sizes=[2, 3], nums=NUMS):
         lists: dict = {}
         for size in sizes:
             lists[size] = torch.tensor(
-                list(itertools.permutations(nums, r=size)),
-                dtype=torch.int,
+                list(itertools.permutations(nums, r=size)), dtype=torch.int,
             )
         return lists
 

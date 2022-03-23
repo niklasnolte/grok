@@ -10,20 +10,23 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchinfo import summary
-        
+
 
 from grok.data import (
     DEFAULT_DATA_DIR,
     ArithmeticDataset,
     ArithmeticIterator,
 )
-from x_transformers import Decoder, TransformerWrapper
+from grok.transformer import Transformer
 
 LOG_DIR = "logs"
+
 
 def generate_causal_mask(sz: int) -> torch.Tensor:
     """Generates an upper-triangular matrix of -inf, with zeros on diag."""
     return torch.triu(torch.ones(sz, sz) * float("-inf"), diagonal=1)
+
+
 class DecoderModel(torch.nn.Module):
     def __init__(
         self,
@@ -47,10 +50,11 @@ class DecoderModel(torch.nn.Module):
         x = self.linear(x)
         return F.softmax(x, dim=-1)
 
+
 class TrainableTransformer:
     def __init__(self, hparams) -> None:
         self.hparams = hparams
-        self.device = torch.device("cpu")#f"cuda:{self.hparams.gpu}")
+        self.device = torch.device("cpu")  # f"cuda:{self.hparams.gpu}")
 
         self.train_dataset, self.val_dataset = ArithmeticDataset.splits(
             train_pct=self.hparams.train_data_pct,  # type: ignore
@@ -60,43 +64,26 @@ class TrainableTransformer:
             device=self.device,
         )
 
-        n_tokens = len(self.train_dataset.tokenizer)
-
-        # self.transformer = DecoderModel(
-        #     torch.nn.TransformerEncoderLayer(
-        #         d_model=self.hparams.d_model,
-        #         nhead=self.hparams.n_heads,
-        #         dim_feedforward=self.hparams.d_model,
-        #         #dropout=0.1,
-        #         activation="relu",
-        #         batch_first=True,
-        #     ),
-        #     torch.nn.Embedding(n_tokens, self.hparams.d_model),
-        #     torch.nn.Linear(self.hparams.d_model, n_tokens),
-        # ).float().to(self.device)
-
-
-        self.transformer = TransformerWrapper(
-            num_tokens=len(self.train_dataset.tokenizer),
-            max_seq_len=6,
-            attn_layers=Decoder(
-                dim=self.hparams.d_model,
-                heads=self.hparams.n_heads,
-                depth=self.hparams.n_layers 
+        self.transformer = (
+            Transformer(
+                self.hparams.n_layers,
+                self.hparams.n_heads,
+                self.hparams.d_model,
+                self.hparams.dropout,
+                self.hparams.max_context_len,
+                len(self.train_dataset.tokenizer),
             )
-        ).float().to(self.device)
-        summary(
-            self.transformer,
-            input_data=[torch.randint(0, 1, (len(self.train_dataset.tokenizer),1))],
+            .float()
+            .to(self.device)
         )
 
         if not self.hparams.no_log:
-          logdir = os.path.join(self.hparams.logdir, LOG_DIR)
-          prefix = "version_"
-          logs = [int(x.split("_")[-1]) for x in os.listdir(logdir) if prefix in x]
-          logdir = os.path.join(logdir, f"{prefix}{max(logs, default=-1)+1}")
-          print("Logging to", logdir)
-          self.writer = SummaryWriter(log_dir=logdir)
+            logdir = os.path.join(self.hparams.logdir, LOG_DIR)
+            prefix = "version_"
+            logs = [int(x.split("_")[-1]) for x in os.listdir(logdir) if prefix in x]
+            logdir = os.path.join(logdir, f"{prefix}{max(logs, default=-1)+1}")
+            print("Logging to", logdir)
+            self.writer = SummaryWriter(log_dir=logdir)
 
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
@@ -152,10 +139,7 @@ class TrainableTransformer:
         parser.add_argument("--weight_decay_kind", type=str, default="to_zero")
         parser.add_argument("--noise_factor", type=float, default=0)
         parser.add_argument(
-            "--beta1",
-            type=float,
-            default=0.9,
-            help="Adam beta1, momentum in sgd",
+            "--beta1", type=float, default=0.9, help="Adam beta1, momentum in sgd",
         )
         parser.add_argument(
             "--beta2",
@@ -211,16 +195,16 @@ class TrainableTransformer:
 
         param_groups = [
             dict(
-                params=self.transformer.attn_layers.parameters(),
+                params=self.transformer.decoder.parameters(),
                 lr=self.hparams.decoder_lr,
                 weight_decay=self.hparams.weight_decay,
             ),
             dict(
-                params=list(self.transformer.token_emb.parameters())+list(self.transformer.pos_emb.parameters()),
+                params=self.transformer.embedding.parameters(),
                 lr=self.hparams.embedding_lr,
             ),
             dict(
-                params=list(self.transformer.to_logits.parameters()) + list(self.transformer.norm.parameters()),
+                params=self.transformer.linear.parameters(),
                 lr=self.hparams.linear_lr,
                 weight_decay=self.hparams.weight_decay,
             ),
@@ -228,8 +212,10 @@ class TrainableTransformer:
 
         optimizer = optim_fn(param_groups, **optim_args)
 
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: self.hparams.lr_multiplier)
-        
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lambda epoch: self.hparams.lr_multiplier
+        )
+
         return optimizer, scheduler
 
     def _accuracy(self, y_hat: Tensor, y: Tensor) -> Tensor:
@@ -251,10 +237,7 @@ class TrainableTransformer:
         return accuracy
 
     def _step(
-        self,
-        batch: Dict,
-        train: bool = True,
-        reduction: str = "mean",
+        self, batch: Dict, train: bool = True, reduction: str = "mean",
     ) -> Tuple[Tensor, Tensor, float, Tensor, Tensor, Tensor, Tensor]:
         """
         Performs one forward pass on a training or validation batch
@@ -272,7 +255,7 @@ class TrainableTransformer:
         """
         x = batch["text"]  # shape = batchsize * context_len
         y = batch["target"]  # shape = batchsize * context_len
-        y_hat = self.transformer(
+        y_hat, *_ = self.transformer(
             x=x,
         )  # shape = batchsize * context_len * vocab_size
         y_hat = y_hat.transpose(-2, -1)  # shape = batchsize * vocab_size * context_len
@@ -302,9 +285,7 @@ class TrainableTransformer:
         return loss, acc, coeff, x_lhs, y_hat_rhs
 
     def training_step(self, batch):
-        loss, accuracy, coeff, x_lhs, y_hat_rhs = self._step(
-            batch=batch, train=True
-        )
+        loss, accuracy, coeff, x_lhs, y_hat_rhs = self._step(batch=batch, train=True)
 
         lr_decoder = self.optimizer.param_groups[0]["lr"]
         lr_embedding = self.optimizer.param_groups[1]["lr"]
@@ -335,7 +316,7 @@ class TrainableTransformer:
             "batches_per_epoch": self.batches_per_epoch,
         }
 
-        #TODO maybe average over the batches?
+        # TODO maybe average over the batches?
         for name, param in self.transformer.named_parameters():
             self.grad_norms["gradnorm_" + name] = torch.norm(param.grad, p=2).item()
 
@@ -344,13 +325,13 @@ class TrainableTransformer:
 
     def log_dict(self, d: Dict) -> None:
         if self.hparams.no_log:
-          return None
+            return None
         for k, v in d.items():
-          self.writer.add_scalar(k, v, self.current_epoch)
+            self.writer.add_scalar(k, v, self.current_epoch)
 
     def validation_step(self, batch):
         with torch.no_grad():
-            loss, accuracy, coeff, x_lhs, y_hat_rhs= self._step(
+            loss, accuracy, coeff, x_lhs, y_hat_rhs = self._step(
                 batch=batch, train=False
             )
         output = {
@@ -473,7 +454,9 @@ def train(hparams: Namespace) -> None:
         vl = logs["val_loss"]
         va = logs["val_accuracy"]
 
-        bar.set_description(f"train loss: {tl:.3e}, train acc: {ta:.3f}, val loss: {vl:.3e}, val acc: {va:.3f}")
+        bar.set_description(
+            f"train loss: {tl:.3e}, train acc: {ta:.3f}, val loss: {vl:.3e}, val acc: {va:.3f}"
+        )
         model.current_epoch += 1
 
 

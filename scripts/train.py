@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 import os
 
-if os.environ.get("CH", "0") != "0":
+if os.environ.get("CH", "0") == "1":
   from grok import training_ch as training
+elif os.environ.get("CH", "0") == "2":
+  from grok import training_custom_transformer as training
 else:
   from grok import training
 
