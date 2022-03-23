@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-from typing import Tuple, List, Dict, Union
+from typing import Tuple, List, Union
 
 import torch
 import torch.nn as nn
 from numpy import cos, sin, sqrt
 from torch import tensor, Tensor
 
+
 class AttentionHead(nn.Module):
-    def __init__(self, d_model: int, d_key: int) -> None:
+    def __init__(self, d_model: int, d_key: int):
 
         super().__init__()
 
@@ -26,7 +27,6 @@ class AttentionHead(nn.Module):
         keys: Tensor,
         values: Tensor,
         mask: Union[Tensor, None] = None,
-        save_activations: bool = False,
     ) -> Tuple[Tensor, Union[Tensor, None], Union[Tensor, None]]:
 
         # project queries, keys, values
@@ -47,119 +47,65 @@ class AttentionHead(nn.Module):
 
         # sum the weighted value vectors
         result: Tensor = torch.matmul(attn, values)  # shape = (max_context_len, d_key)
-        if save_activations:
-            leaf_attn = attn.clone().detach()  # type: ignore
-            leaf_values = values.clone().detach()  # type: ignore
-        else:
-            leaf_attn = None  # type: ignore
-            leaf_values = None  # type: ignore
 
-        return result, leaf_attn, leaf_values
+        return result
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model: int, heads: int) -> None:
+    def __init__(self, d_model: int, heads: int):
         super().__init__()
         d_key = int(d_model / heads)
 
-        attn_heads = [
-            AttentionHead(d_model, d_key)
-            for _ in range(heads)
-        ]
+        attn_heads = [AttentionHead(d_model, d_key) for _ in range(heads)]
         self.attn_heads = nn.ModuleList(attn_heads)
         self.Wo = nn.Linear(d_model, d_model, bias=False)
 
     def forward(
-        self,
-        queries: Tensor,
-        keys: Tensor,
-        values: Tensor,
-        mask: Tensor = None,
-        save_activations=False,
+        self, queries: Tensor, keys: Tensor, values: Tensor, mask: Tensor = None,
     ) -> Tuple[Tensor, List[Tensor], List[Tensor]]:
 
         head_outputs = [
-            h(
-                queries=queries,
-                keys=keys,
-                values=values,
-                mask=mask,
-                save_activations=save_activations,
-            )
+            h(queries=queries, keys=keys, values=values, mask=mask,)
             for h in self.attn_heads
         ]
-        head_results = [output[0] for output in head_outputs]
 
-        if save_activations:
-            layer_attns = list([output[1] for output in head_outputs])
-            layer_values = list([output[2] for output in head_outputs])
-        else:
-            layer_attns = []
-            layer_values = []
-
-        multihead_result = torch.cat(head_results, dim=-1)
+        multihead_result = torch.cat(head_outputs, dim=-1)
         multihead_result = self.Wo(multihead_result)
-        return multihead_result, layer_attns, layer_values
-
-
-class FFN(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        multiplier: int = 4,
-        non_linearity: str = "relu",
-    ) -> None:
-        super().__init__()
-
-        d_ff = int(multiplier * d_model)
-
-        non_linearities = {"relu": nn.ReLU, "gelu": nn.GELU}
-
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_ff, bias=False),
-            non_linearities[non_linearity](),
-            nn.Linear(d_ff, d_model, bias=False),
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.ffn(x)
+        return multihead_result
 
 
 class DecoderBlock(nn.Module):
     def __init__(
-        self,
-        d_model: int,
-        heads: int,
-        dropout: float,
-        non_linearity: str = "relu",
-    ) -> None:
+        self, d_model: int, heads: int, dropout: float, non_linearity: str = "relu",
+    ):
         super().__init__()
 
         self.self_attn = MultiHeadAttention(d_model, heads)
-        # self.self_attn_drop = nn.Dropout(p=dropout)
         self.self_attn_norm = nn.LayerNorm(d_model)
 
-        self.ffn = FFN(d_model, non_linearity=non_linearity)
-        self.ffn_drop = nn.Dropout(p=dropout)
+        non_linearities = {"relu": nn.ReLU, "gelu": nn.GELU}
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4, bias=False),
+            non_linearities[non_linearity](),
+            nn.Linear(d_model * 4, d_model, bias=False),
+        )
+        if dropout == 0:
+            self.ffn_drop = nn.Identity()
+        else:
+            self.ffn_drop = nn.Dropout(p=dropout)
         self.ffn_norm = nn.LayerNorm(d_model)
 
     def forward(
-        self,
-        x: Tensor,
-        self_attn_mask: Tensor = None,
-        save_activations: bool = False,
+        self, x: Tensor, self_attn_mask: Tensor = None,
     ) -> Tuple[Tensor, List[Tensor], List[Tensor]]:
-        a1, layer_attns, layer_values = self.self_attn(
-            x, x, x, self_attn_mask, save_activations
-        )
-        # a1 = self.self_attn_drop(a1)
+        a1 = self.self_attn(x, x, x, self_attn_mask)
         a1 = self.self_attn_norm(x + a1)
 
         a2 = self.ffn(a1)
         a2 = self.ffn_drop(a2)
         a2 = self.ffn_norm(a1 + a2)
 
-        return a2, layer_attns, layer_values
+        return a2
 
 
 class Decoder(nn.Module):
@@ -175,31 +121,17 @@ class Decoder(nn.Module):
 
         self.blocks = nn.ModuleList(
             [
-                DecoderBlock(
-                    d_model, heads, dropout, non_linearity
-                )
+                DecoderBlock(d_model, heads, dropout, non_linearity)
                 for _ in range(num_blocks)
             ]
         )
 
     def forward(
-        self,
-        x: Tensor,
-        self_attn_mask: Tensor = None,
-        save_activations=False,
+        self, x: Tensor, self_attn_mask: Tensor = None,
     ) -> Tuple[Tensor, List[List[Tensor]], List[List[Tensor]]]:
-
-        a = x
-        attentions = []
-        values = []
         for block in self.blocks:
-            a, layer_attentions, layer_values = block(
-                a, self_attn_mask, save_activations=save_activations
-            )
-            if save_activations:
-                attentions.append(layer_attentions)
-                values.append(layer_values)
-        return a, attentions, values
+            x = block(x, self_attn_mask)
+        return x
 
 
 class Transformer(nn.Module):
@@ -230,13 +162,7 @@ class Transformer(nn.Module):
         )
         self.register_buffer("self_attn_mask", self.make_mask(max_context_len))
 
-        self.decoder = Decoder(
-            d_model,
-            n_heads,
-            n_layers,
-            dropout,
-            self.non_linearity,
-        )
+        self.decoder = Decoder(d_model, n_heads, n_layers, dropout, self.non_linearity,)
 
         self.linear = nn.Linear(d_model, vocab_len, bias=False)
 
@@ -263,17 +189,12 @@ class Transformer(nn.Module):
 
     def embed(self, indices: Tensor) -> Tensor:
         context_len = indices.shape[-1]
-        pe = self.position_encoding[:context_len, :]  # type: ignore
-
+        pe = self.position_encoding[:context_len]  # type: ignore
         embedded = self.embedding(indices)
-
         return pe + embedded
 
     def forward(
-        self,
-        x: Tensor,
-        pos: int = None,
-        save_activations: bool = False,
+        self, x: Tensor, pos: int = None,
     ) -> Tuple[Tensor, Union[Tensor, None], Union[Tensor, None]]:
         """parameters:
         x:  (rank-1 tensor) vocab indices of decoder input token
@@ -290,13 +211,11 @@ class Transformer(nn.Module):
 
         # Decode
         x = self.embed(x)
-        decoded, attentions, values = self.decoder(
-            x, self_attn_mask, save_activations=save_activations
-        )
+        decoded = self.decoder(x, self_attn_mask)
 
         # Return predictions for specific token
         if pos is not None:
             decoded = decoded[:, pos, :]
 
         y_hat = self.linear(decoded)
-        return y_hat, attentions, values
+        return y_hat

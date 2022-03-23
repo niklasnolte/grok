@@ -255,7 +255,7 @@ class TrainableTransformer:
         """
         x = batch["text"]  # shape = batchsize * context_len
         y = batch["target"]  # shape = batchsize * context_len
-        y_hat, *_ = self.transformer(
+        y_hat = self.transformer(
             x=x,
         )  # shape = batchsize * context_len * vocab_size
         y_hat = y_hat.transpose(-2, -1)  # shape = batchsize * vocab_size * context_len
