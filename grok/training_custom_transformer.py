@@ -2,6 +2,7 @@ import os
 from argparse import ArgumentParser, Namespace
 from typing import Dict, Tuple
 from copy import deepcopy
+import json
 
 from tqdm import tqdm
 import numpy as np
@@ -52,8 +53,16 @@ class DecoderModel(torch.nn.Module):
 
 
 class TrainableTransformer:
-    def __init__(self, hparams, ckpt: str = None) -> None:
-        self.hparams = hparams
+    def __init__(self, hparams = None, checkpoint = None) -> None:
+        if checkpoint is not None:
+          assert hparams is None
+          cp_path = os.path.dirname(checkpoint)
+          with open(os.path.join(cp_path, "hparams.json"), "r") as f:
+            self.hparams = Namespace(**json.load(f))
+            self.hparams.no_log = True
+        else:
+          assert hparams is not None
+          self.hparams = hparams
         self.device = torch.device(f"cuda:{self.hparams.gpu}")
 
         self.train_dataset, self.val_dataset = ArithmeticDataset.splits(
@@ -77,28 +86,35 @@ class TrainableTransformer:
             .to(self.device)
         )
 
-        if ckpt is not None:
-          self.transformer.load_state_dict(torch.load(ckpt))
+        if checkpoint is not None:
+          self.transformer.load_state_dict(torch.load(checkpoint))
 
         if not self.hparams.no_log:
             self.logdir = os.path.join(self.hparams.logdir, LOG_DIR)
             prefix = "version_"
-            logs = [int(x.split("_")[-1]) for x in os.listdir(self.logdir) if prefix in x]
-            self.logdir = os.path.join(self.logdir, f"{prefix}{max(logs, default=-1)+1}")
+            logs = [
+                int(x.split("_")[-1]) for x in os.listdir(self.logdir) if prefix in x
+            ]
+            self.logdir = os.path.join(
+                self.logdir, f"{prefix}{max(logs, default=-1)+1}"
+            )
             print("Logging to", self.logdir)
             self.writer = SummaryWriter(log_dir=self.logdir)
             self.writer.add_hparams(vars(self.hparams), {"z": 0}, run_name=".")
             self.checkpoint_path = os.path.join(self.logdir, "checkpoints")
             os.makedirs(self.checkpoint_path, exist_ok=True)
+            with open(os.path.join(self.checkpoint_path, "hparams.json"), "w") as f:
+                json.dump(vars(self.hparams), f, indent=2)
 
-        self.next_epoch_to_eval = -1
-        self.next_train_epoch_to_log = 0
-        self.grad_norms = dict()
+        if checkpoint is None:
+          self.next_epoch_to_eval = -1
+          self.next_train_epoch_to_log = 0
+          self.grad_norms = dict()
+          self.current_epoch = 0
+          self.best_val_accuracy = 0
+          self.next_checkpoint_val_accuracy = 0
 
         self.optimizer, self.scheduler = self.configure_optim()
-        self.current_epoch = 0
-        self.best_val_accuracy = 0
-        self.next_checkpoint_val_accuracy = 0
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -111,6 +127,8 @@ class TrainableTransformer:
         :returns: the argument parser with the command line arguments added
                   for this class.
         """
+        parser.add_argument("--checkpoint", type=str, default=None)
+
         parser.add_argument(
             "--batchsize",
             type=float,
@@ -245,7 +263,7 @@ class TrainableTransformer:
 
     def _step(
         self, batch: Dict, train: bool = True, reduction: str = "mean",
-    ) -> Tuple[Tensor, Tensor, float, Tensor, Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, float, Tensor, Tensor]:
         """
         Performs one forward pass on a training or validation batch
 
@@ -256,13 +274,11 @@ class TrainableTransformer:
                   The fraction of this dataset contained in this batch
                   The portion of the input equations left of the equal sign
                   The softmax probilities for the solutions to the equations
-                  A list lists of attention matrices by layer and head
-                  A list lists of value matrices by layer and head
                   Margin for this batch
         """
         x = batch["text"]  # shape = batchsize * context_len
         y = batch["target"]  # shape = batchsize * context_len
-        y_hat = self.transformer(x=x,)  # shape = batchsize * context_len * vocab_size
+        y_hat = self.transformer(x=x)  # shape = batchsize * context_len * vocab_size
         y_hat = y_hat.transpose(-2, -1)  # shape = batchsize * vocab_size * context_len
 
         # Note: each sample must have exactly one '=' and all of them must
@@ -384,8 +400,7 @@ class TrainableTransformer:
             torch.save(
                 self.transformer.state_dict(),
                 os.path.join(
-                    self.checkpoint_path,
-                    "epoch_" + str(self.current_epoch) + ".ckpt",
+                    self.checkpoint_path, "epoch_" + str(self.current_epoch) + ".ckpt",
                 ),
             )
             self.next_checkpoint_val_accuracy += 5
@@ -416,7 +431,6 @@ def train(hparams: Namespace) -> None:
         torch.cuda.manual_seed(hparams.random_seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-
 
     # Create the model
     model: TrainableTransformer = TrainableTransformer(hparams)
@@ -449,6 +463,8 @@ def train(hparams: Namespace) -> None:
             f"train loss: {tl:.3e}, train acc: {ta:.3f}, val loss: {vl:.3e}, val acc: {va:.3f}"
         )
         model.current_epoch += 1
+        if model.best_val_accuracy >= 100:
+          break
 
 
 def add_args(parser=None) -> Namespace:
@@ -466,6 +482,7 @@ def add_args(parser=None) -> Namespace:
     parser.set_defaults(no_log=False)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser
+
 
 if __name__ == "__main__":
     parser = add_args()
