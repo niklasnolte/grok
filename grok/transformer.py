@@ -103,7 +103,9 @@ class DecoderBlock(nn.Module):
 
         a2 = self.ffn(a1)
         a2 = self.ffn_drop(a2)
+        a1 = self.ffn_drop(a1)
         a2 = self.ffn_norm(a1 + a2)
+
 
         return a2
 

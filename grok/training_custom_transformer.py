@@ -52,9 +52,9 @@ class DecoderModel(torch.nn.Module):
 
 
 class TrainableTransformer:
-    def __init__(self, hparams) -> None:
+    def __init__(self, hparams, ckpt: str = None) -> None:
         self.hparams = hparams
-        self.device = torch.device("cpu")  # f"cuda:{self.hparams.gpu}")
+        self.device = torch.device(f"cuda:{self.hparams.gpu}")
 
         self.train_dataset, self.val_dataset = ArithmeticDataset.splits(
             train_pct=self.hparams.train_data_pct,  # type: ignore
@@ -77,13 +77,19 @@ class TrainableTransformer:
             .to(self.device)
         )
 
+        if ckpt is not None:
+          self.transformer.load_state_dict(torch.load(ckpt))
+
         if not self.hparams.no_log:
-            logdir = os.path.join(self.hparams.logdir, LOG_DIR)
+            self.logdir = os.path.join(self.hparams.logdir, LOG_DIR)
             prefix = "version_"
-            logs = [int(x.split("_")[-1]) for x in os.listdir(logdir) if prefix in x]
-            logdir = os.path.join(logdir, f"{prefix}{max(logs, default=-1)+1}")
-            print("Logging to", logdir)
-            self.writer = SummaryWriter(log_dir=logdir)
+            logs = [int(x.split("_")[-1]) for x in os.listdir(self.logdir) if prefix in x]
+            self.logdir = os.path.join(self.logdir, f"{prefix}{max(logs, default=-1)+1}")
+            print("Logging to", self.logdir)
+            self.writer = SummaryWriter(log_dir=self.logdir)
+            self.writer.add_hparams(vars(self.hparams), {"z": 0}, run_name=".")
+            self.checkpoint_path = os.path.join(self.logdir, "checkpoints")
+            os.makedirs(self.checkpoint_path, exist_ok=True)
 
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
@@ -91,6 +97,8 @@ class TrainableTransformer:
 
         self.optimizer, self.scheduler = self.configure_optim()
         self.current_epoch = 0
+        self.best_val_accuracy = 0
+        self.next_checkpoint_val_accuracy = 0
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -106,7 +114,6 @@ class TrainableTransformer:
         parser.add_argument(
             "--batchsize",
             type=float,
-            # default=0.25,
             default=0,
             help="-1 -> entire dataset, 0 -> auto-calculate, 0<N<1 -> fraction of dataset, N>1 -> N",
         )
@@ -255,9 +262,7 @@ class TrainableTransformer:
         """
         x = batch["text"]  # shape = batchsize * context_len
         y = batch["target"]  # shape = batchsize * context_len
-        y_hat = self.transformer(
-            x=x,
-        )  # shape = batchsize * context_len * vocab_size
+        y_hat = self.transformer(x=x,)  # shape = batchsize * context_len * vocab_size
         y_hat = y_hat.transpose(-2, -1)  # shape = batchsize * vocab_size * context_len
 
         # Note: each sample must have exactly one '=' and all of them must
@@ -352,6 +357,8 @@ class TrainableTransformer:
         loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
         accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
 
+        self.best_val_accuracy = max(accuracy, self.best_val_accuracy)
+
         logs = {
             "val_loss": loss,
             "val_accuracy": accuracy,
@@ -373,19 +380,15 @@ class TrainableTransformer:
             logs["full_train_acc"] = tr_acc
 
         self.log_dict(logs)
-        # save a checkpoint if the epoch is a power of 2
-        if (
-            self.current_epoch > 0
-            and int(2 ** (int(np.log(self.current_epoch) / np.log(2))))
-            == self.current_epoch
-        ):
+        if self.best_val_accuracy >= self.next_checkpoint_val_accuracy:
             torch.save(
                 self.transformer.state_dict(),
                 os.path.join(
-                    self.hparams.checkpoint_path,
+                    self.checkpoint_path,
                     "epoch_" + str(self.current_epoch) + ".ckpt",
                 ),
             )
+            self.next_checkpoint_val_accuracy += 5
         return logs
 
 
@@ -414,21 +417,9 @@ def train(hparams: Namespace) -> None:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    checkpoint_path = hparams.logdir + "/checkpoints"
-    os.makedirs(checkpoint_path, exist_ok=True)
-    hparams.checkpoint_path = checkpoint_path
 
     # Create the model
     model: TrainableTransformer = TrainableTransformer(hparams)
-
-    torch.save(model.transformer, os.path.join(checkpoint_path, "init.pt"))
-
-    if not hparams.no_log:
-        pass
-        # dont log
-    else:
-        pass
-        # do log
 
     bar = tqdm(range(hparams.max_epochs))
     for epoch in bar:
@@ -475,3 +466,12 @@ def add_args(parser=None) -> Namespace:
     parser.set_defaults(no_log=False)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser
+
+if __name__ == "__main__":
+    parser = add_args()
+    parser.set_defaults(logdir=os.environ.get("GROK_LOGDIR", "."))
+    hparams = parser.parse_args()
+    hparams.datadir = os.path.abspath(hparams.datadir)
+    hparams.logdir = os.path.abspath(hparams.logdir)
+    print(hparams)
+    train(hparams)
