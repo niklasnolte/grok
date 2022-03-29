@@ -27,42 +27,17 @@ def generate_causal_mask(sz: int) -> torch.Tensor:
     """Generates an upper-triangular matrix of -inf, with zeros on diag."""
     return torch.triu(torch.ones(sz, sz) * float("-inf"), diagonal=1)
 
-
-class DecoderModel(torch.nn.Module):
-    def __init__(
-        self,
-        decoder_layer: torch.nn.TransformerDecoderLayer,
-        embedding_layer: torch.nn.Embedding,
-        linear: torch.nn.Linear,
-        n_decoders=2,
-    ):
-        super().__init__()
-        self.decoder_layers = torch.nn.ModuleList(
-            [deepcopy(decoder_layer) for _ in range(n_decoders)]
-        )
-        self.embedding_layer = embedding_layer
-        self.linear = linear
-
-    def forward(self, x):
-        x = self.embedding_layer(x)
-        causal_mask = generate_causal_mask(x.shape[1]).to(x.device)
-        for layer in self.decoder_layers:
-            x = layer(x, causal_mask)
-        x = self.linear(x)
-        return F.softmax(x, dim=-1)
-
-
 class TrainableTransformer:
-    def __init__(self, hparams = None, checkpoint = None) -> None:
+    def __init__(self, hparams=None, checkpoint=None) -> None:
         if checkpoint is not None:
-          assert hparams is None
-          cp_path = os.path.dirname(checkpoint)
-          with open(os.path.join(cp_path, "hparams.json"), "r") as f:
-            self.hparams = Namespace(**json.load(f))
-            self.hparams.no_log = True
+            assert hparams is None
+            cp_path = os.path.dirname(checkpoint)
+            with open(os.path.join(cp_path, "hparams.json"), "r") as f:
+                self.hparams = Namespace(**json.load(f))
+                self.hparams.no_log = True
         else:
-          assert hparams is not None
-          self.hparams = hparams
+            assert hparams is not None
+            self.hparams = hparams
         self.device = torch.device(f"cuda:{self.hparams.gpu}")
 
         self.train_dataset, self.val_dataset = ArithmeticDataset.splits(
@@ -87,7 +62,7 @@ class TrainableTransformer:
         )
 
         if checkpoint is not None:
-          self.transformer.load_state_dict(torch.load(checkpoint))
+            self.transformer.load_state_dict(torch.load(checkpoint))
 
         if not self.hparams.no_log:
             self.logdir = os.path.join(self.hparams.logdir, LOG_DIR)
@@ -107,12 +82,17 @@ class TrainableTransformer:
                 json.dump(vars(self.hparams), f, indent=2)
 
         if checkpoint is None:
-          self.next_epoch_to_eval = -1
-          self.next_train_epoch_to_log = 0
-          self.grad_norms = dict()
-          self.current_epoch = 0
-          self.best_val_accuracy = 0
-          self.next_checkpoint_val_accuracy = 0
+            self.next_epoch_to_eval = -1
+            self.next_train_epoch_to_log = 0
+            self.grad_norms = dict()
+            self.current_epoch = 0
+            self.best_val_accuracy = 0
+            self.next_checkpoint_val_accuracy = 0
+            # save initialization
+            torch.save(
+                self.transformer.state_dict(),
+                os.path.join(self.checkpoint_path, "init.ckpt",),
+            )
 
         self.optimizer, self.scheduler = self.configure_optim()
 
@@ -306,7 +286,7 @@ class TrainableTransformer:
         return loss, acc, coeff, x_lhs, y_hat_rhs
 
     def training_step(self, batch):
-        loss, accuracy, coeff, x_lhs, y_hat_rhs = self._step(batch=batch, train=True)
+        loss, accuracy, coeff, _, y_hat_rhs = self._step(batch=batch, train=True)
 
         lr_decoder = self.optimizer.param_groups[0]["lr"]
         lr_embedding = self.optimizer.param_groups[1]["lr"]
@@ -399,9 +379,7 @@ class TrainableTransformer:
         if self.best_val_accuracy >= self.next_checkpoint_val_accuracy:
             torch.save(
                 self.transformer.state_dict(),
-                os.path.join(
-                    self.checkpoint_path, "epoch_" + str(self.current_epoch) + ".ckpt",
-                ),
+                os.path.join(self.checkpoint_path, f"epoch_{self.current_epoch}.ckpt",),
             )
             self.next_checkpoint_val_accuracy += 5
         return logs
@@ -464,7 +442,7 @@ def train(hparams: Namespace) -> None:
         )
         model.current_epoch += 1
         if model.best_val_accuracy >= 100:
-          break
+            break
 
 
 def add_args(parser=None) -> Namespace:
