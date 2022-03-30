@@ -27,6 +27,7 @@ def generate_causal_mask(sz: int) -> torch.Tensor:
     """Generates an upper-triangular matrix of -inf, with zeros on diag."""
     return torch.triu(torch.ones(sz, sz) * float("-inf"), diagonal=1)
 
+
 class TrainableTransformer:
     def __init__(self, hparams=None, checkpoint=None) -> None:
         if checkpoint is not None:
@@ -86,13 +87,14 @@ class TrainableTransformer:
             self.next_train_epoch_to_log = 0
             self.grad_norms = dict()
             self.current_epoch = 0
-            self.best_val_accuracy = 0
-            self.next_checkpoint_val_accuracy = 0
+            self.best_val_loss = np.inf
+            self.next_checkpoint_val_loss = 1
             # save initialization
-            torch.save(
-                self.transformer.state_dict(),
-                os.path.join(self.checkpoint_path, "init.ckpt",),
-            )
+            if not self.hparams.no_log:
+              torch.save(
+                  self.transformer.state_dict(),
+                  os.path.join(self.checkpoint_path, "init.ckpt",),
+              )
 
         self.optimizer, self.scheduler = self.configure_optim()
 
@@ -353,7 +355,7 @@ class TrainableTransformer:
         loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
         accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
 
-        self.best_val_accuracy = max(accuracy, self.best_val_accuracy)
+        self.best_val_loss = min(loss, self.best_val_loss)
 
         logs = {
             "val_loss": loss,
@@ -376,12 +378,16 @@ class TrainableTransformer:
             logs["full_train_acc"] = tr_acc
 
         self.log_dict(logs)
-        if self.best_val_accuracy >= self.next_checkpoint_val_accuracy:
+
+        if not self.hparams.no_log and (
+            self.best_val_loss < self.next_checkpoint_val_loss
+            or self.current_epoch == self.hparams.max_epochs - 1
+        ):
             torch.save(
                 self.transformer.state_dict(),
-                os.path.join(self.checkpoint_path, f"epoch_{self.current_epoch}.ckpt",),
+                os.path.join(self.checkpoint_path, f"epoch_{self.current_epoch}_loss_{loss:.2e}.ckpt",),
             )
-            self.next_checkpoint_val_accuracy += 5
+            self.next_checkpoint_val_loss /= 2
         return logs
 
 
@@ -441,8 +447,8 @@ def train(hparams: Namespace) -> None:
             f"train loss: {tl:.3e}, train acc: {ta:.3f}, val loss: {vl:.3e}, val acc: {va:.3f}"
         )
         model.current_epoch += 1
-        if model.best_val_accuracy >= 100:
-            break
+        # if model.best_val_loss < 1e-5:
+        #     break
 
 
 def add_args(parser=None) -> Namespace:
