@@ -1,7 +1,6 @@
 import os
 from argparse import ArgumentParser, Namespace
 from typing import Dict, Tuple
-from copy import deepcopy
 import json
 
 from tqdm import tqdm
@@ -10,7 +9,6 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
-from torchinfo import summary
 
 
 from grok.data import (
@@ -381,7 +379,7 @@ class TrainableTransformer:
 
         if not self.hparams.no_log and (
             self.best_val_loss < self.next_checkpoint_val_loss
-            or self.current_epoch == self.hparams.max_epochs - 1
+            or (self.current_epoch + 1) % 1000 == 0
         ):
             torch.save(
                 self.transformer.state_dict(),
