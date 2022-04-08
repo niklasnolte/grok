@@ -323,8 +323,6 @@ class ArithmeticDataset:
             for i in range(noise_level):
                 data[i] = data[i].split(" = ")[0] + " = " + random_answers[i]
 
-        data = [EOS_TOKEN + " " + eq + " " + EOS_TOKEN for eq in data]
-
         return data
 
     @classmethod
@@ -416,7 +414,7 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
             raise StopIteration
         indices = self.permutation[batch_begin : batch_begin + self.batchsize]
         text = self.dataset.data[indices, :-1]
-        target = self.dataset.data[indices, 1:]
+        target = self.dataset.data[indices, -1:]
         batch = {"text": text, "target": target}
         self.index += 1
         return batch
