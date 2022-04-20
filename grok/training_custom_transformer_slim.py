@@ -17,14 +17,6 @@ from grok.data import (
 )
 from grok.transformer import Transformer
 
-LOG_DIR = "logs"
-
-
-def generate_causal_mask(sz: int) -> torch.Tensor:
-    """Generates an upper-triangular matrix of -inf, with zeros on diag."""
-    return torch.triu(torch.ones(sz, sz) * float("-inf"), diagonal=1)
-
-
 class TrainableTransformer(torch.nn.Module):
     def __init__(self, hparams=None, checkpoint=None) -> None:
         super().__init__()
@@ -64,7 +56,8 @@ class TrainableTransformer(torch.nn.Module):
             self.transformer.load_state_dict(torch.load(checkpoint))
 
         if not self.hparams.no_log:
-            self.logdir = os.path.join(self.hparams.logdir, LOG_DIR)
+            self.logdir = self.hparams.logdir
+            os.makedirs(self.logdir, exist_ok=True)
             prefix = "version_"
             logs = [
                 int(x.split("_")[-1]) for x in os.listdir(self.logdir) if prefix in x
@@ -160,7 +153,7 @@ class TrainableTransformer(torch.nn.Module):
         )
 
         parser.add_argument(
-            "--logdir", type=str, default=".",
+            "--logdir", type=str, default="logs",
         )
         parser.add_argument(
             "--datadir", type=str, default=DEFAULT_DATA_DIR,
@@ -328,6 +321,7 @@ def train(hparams: Namespace) -> None:
 
     # Process the args
     hparams.logdir = os.path.abspath(hparams.logdir)
+    hparams.datadir = os.path.abspath(hparams.datadir)
 
     # Make sure d_model, heads, and d_key are compatible
     assert hparams.d_model % hparams.n_heads == 0, (
@@ -346,12 +340,15 @@ def train(hparams: Namespace) -> None:
     # Create the model
     model: TrainableTransformer = TrainableTransformer(hparams)
 
+    finish_at_epoch = None # will be set when test acc ~ 100%
+
     bar = tqdm(range(hparams.max_epochs))
     for epoch in bar:
         train_data = model.train_dataloader()
         val_data = model.val_dataloader()
         losses = []
         accuracies = []
+        model.train()
         for train_data_i in train_data:
             target = train_data_i["target"]
             model.optimizer.zero_grad()
@@ -370,7 +367,7 @@ def train(hparams: Namespace) -> None:
                 model.optimizer.step()
             model.scheduler.step()
         tl, ta = model.training_epoch_end(losses, accuracies)
-
+        model.eval()
         losses = []
         accuracies = []
         for val_data_i in val_data:
@@ -385,6 +382,12 @@ def train(hparams: Namespace) -> None:
             f"train loss: {tl:.3e}, train acc: {ta:.3f}, val loss: {vl:.3e}, val acc: {va:.3f}"
         )
         model.current_epoch += 1
+        if finish_at_epoch is None and va > 99.9:
+            finish_at_epoch = epoch + 500 # give it some more
+            print(f"generalization achieved at epoch {epoch}, stopping at {finish_at_epoch}")
+
+        if epoch == finish_at_epoch:
+            break
 
 
 def add_args(parser=None) -> Namespace:
@@ -395,9 +398,9 @@ def add_args(parser=None) -> Namespace:
     """
     if parser is None:
         parser = ArgumentParser()
-    parser.add_argument("--random_seed", type=int, default=-1)
+    parser.add_argument("--random_seed", type=int, default=1) # -1 for no seed
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--max_epochs", type=int, default=20000)
+    parser.add_argument("--max_epochs", type=int, default=100000)
     parser.add_argument("--no_log", action="store_true")
     parser.set_defaults(no_log=False)
     parser = TrainableTransformer.add_model_specific_args(parser)
@@ -406,9 +409,6 @@ def add_args(parser=None) -> Namespace:
 
 if __name__ == "__main__":
     parser = add_args()
-    parser.set_defaults(logdir=os.environ.get("GROK_LOGDIR", "."))
     hparams = parser.parse_args()
-    hparams.datadir = os.path.abspath(hparams.datadir)
-    hparams.logdir = os.path.abspath(hparams.logdir)
     print(hparams)
     train(hparams)
