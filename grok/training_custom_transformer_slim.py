@@ -17,6 +17,7 @@ from grok.data import (
 )
 from grok.transformer import Transformer
 
+
 class TrainableTransformer(torch.nn.Module):
     def __init__(self, hparams=None, checkpoint=None) -> None:
         super().__init__()
@@ -137,6 +138,9 @@ class TrainableTransformer(torch.nn.Module):
         parser.add_argument("--weight_decay_kind", type=str, default="to_zero")
         parser.add_argument("--noise_factor", type=float, default=0)
         parser.add_argument("--esam", action="store_true")
+        parser.add_argument("--esam_rho", type=float, default=0.05)
+        parser.add_argument("--esam_beta", type=float, default=1)
+        parser.add_argument("--esam_gamma", type=float, default=1)
         parser.add_argument(
             "--beta1", type=float, default=0.9, help="Adam beta1, momentum in sgd",
         )
@@ -212,7 +216,13 @@ class TrainableTransformer(torch.nn.Module):
         if self.hparams.esam:
             from esam import ESAM
 
-            optimizer = ESAM(param_groups, optimizer)
+            optimizer = ESAM(
+                param_groups,
+                optimizer,
+                rho=self.hparams.esam_rho,
+                beta=self.hparams.esam_beta,
+                gamma=self.hparams.esam_gamma,
+            )
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lambda epoch: self.hparams.lr_multiplier
@@ -340,7 +350,7 @@ def train(hparams: Namespace) -> None:
     # Create the model
     model: TrainableTransformer = TrainableTransformer(hparams)
 
-    finish_at_epoch = None # will be set when test acc ~ 100%
+    finish_at_epoch = None  # will be set when test acc ~ 100%
 
     bar = tqdm(range(hparams.max_epochs))
     for epoch in bar:
@@ -383,8 +393,10 @@ def train(hparams: Namespace) -> None:
         )
         model.current_epoch += 1
         if finish_at_epoch is None and va > 99.9:
-            finish_at_epoch = epoch + 500 # give it some more
-            print(f"generalization achieved at epoch {epoch}, stopping at {finish_at_epoch}")
+            finish_at_epoch = epoch + 500  # give it some more
+            print(
+                f"generalization achieved at epoch {epoch}, stopping at {finish_at_epoch}"
+            )
 
         if epoch == finish_at_epoch:
             break
@@ -398,7 +410,7 @@ def add_args(parser=None) -> Namespace:
     """
     if parser is None:
         parser = ArgumentParser()
-    parser.add_argument("--random_seed", type=int, default=1) # -1 for no seed
+    parser.add_argument("--random_seed", type=int, default=1)  # -1 for no seed
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--max_epochs", type=int, default=100000)
     parser.add_argument("--no_log", action="store_true")

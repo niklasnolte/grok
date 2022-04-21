@@ -7,6 +7,9 @@ def train_cmd(
     random_seed=1,
     train_data_pct=70,
     dropout=0,
+    esam_rho=.05,
+    esam_beta=1,
+    esam_gamma=1,
 ):
     return " ".join(
         [
@@ -20,5 +23,8 @@ def train_cmd(
             f"--random_seed {random_seed}",
             f"--train_data_pct {train_data_pct}",
             f"--dropout {dropout}",
+            f"--esam_rho {esam_rho}",
+            f"--esam_beta {esam_beta}",
+            f"--esam_gamma {esam_gamma}",
         ]
     )

@@ -25,7 +25,8 @@ rule all:
   input:
     expand("logs/weight_decay_{wd}", wd=[0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100]),
     expand("logs/dropout_{do}", do=[0, .1, .2, .3, .5]),
-    expand("logs/decoder_lr_{lr}", lr=[1, .1, .01, .001])
+    expand("logs/decoder_lr_{lr}", lr=[1, .1, .01, .001]),
+    expand("logs/esam_rho_{rho}_beta_{beta}_gamma_{gamma}", rho=[.01, .05, .1, .5, 1], beta=[.5, 1, 2], gamma=[.5, 1, 2]),
 
 
 rule with_weight_decay:
@@ -48,3 +49,10 @@ rule with_slow_decoder:
   run: 
     cmd = train_cmd(decoder_lr=wildcards.lr)
     run_on_free_gpu(cmd + f" --logdir={output.logs}")
+
+rule with_esam:
+  output:
+    logs = directory("logs/esam_rho_{rho}_beta_{beta}_gamma_{gamma}")
+  run:
+    cmd = train_cmd(esam_rho=wildcards.rho, esam_beta=wildcards.beta, esam_gamma=wildcards.gamma)
+    run_on_free_gpu(cmd + f" --esam --logdir={output.logs}")
