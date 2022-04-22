@@ -5,7 +5,7 @@ def train_cmd(
     decoder_lr=1,
     max_epochs=100000,
     random_seed=1,
-    train_data_pct=70,
+    train_data_pct=50,
     dropout=0,
     esam_rho=.05,
     esam_beta=1,
