@@ -26,7 +26,7 @@ def plot_tsne(checkpoint: str, save: str = None, embedding: bool = False):
         print(transformer.hparams)
         val_data = next(transformer.val_dataloader())
         target = val_data["target"]
-        y_hat = transformer.step(val_data["text"])
+        y_hat = transformer(val_data["text"])
         loss = F.cross_entropy(y_hat, target).item()
         acc = transformer.accuracy(y_hat, target).mean().item()
         print(f"Loss: {loss}, Acc: {acc}")
@@ -64,7 +64,6 @@ def plot_tsne(checkpoint: str, save: str = None, embedding: bool = False):
         else:
             plt.savefig(save)
         plt.close()
-
 
 def savepath_from_ckpt(checkpoint: str, embedding: bool):
     return (

@@ -1,6 +1,7 @@
 import os
 from argparse import ArgumentParser, Namespace
 import json
+from collections import defaultdict
 
 from tqdm import tqdm
 import numpy as np
@@ -69,6 +70,7 @@ class TrainableTransformer(torch.nn.Module):
             print("Logging to", self.logdir)
             self.writer = SummaryWriter(log_dir=self.logdir)
             self.writer.add_hparams(vars(self.hparams), {"z": 0}, run_name=".")
+            self.json_persisted_info = defaultdict(list)
             self.checkpoint_path = os.path.join(self.logdir, "checkpoints")
             os.makedirs(self.checkpoint_path, exist_ok=True)
             with open(os.path.join(self.checkpoint_path, "hparams.json"), "w") as f:
@@ -269,20 +271,23 @@ class TrainableTransformer(torch.nn.Module):
             "train_loss": loss,
             "train_accuracy": accuracy,
         }
+        self.log_dict(logs, to_json=True)
 
         # TODO maybe average over the batches?
         for name, param in self.transformer.named_parameters():
             self.grad_norms["gradnorm_" + name] = torch.norm(param.grad, p=2).item()
 
-        self.log_dict(logs)
         self.log_dict(self.grad_norms)
         return loss, accuracy
 
-    def log_dict(self, d: dict) -> None:
+    def log_dict(self, d: dict, to_json:bool = False) -> None:
         if self.hparams.no_log:
             return None
         for k, v in d.items():
             self.writer.add_scalar(k, v, self.current_epoch)
+        if to_json:
+            for k,v in d.items():
+              self.json_persisted_info[k].append((self.current_epoch, v.item()))
 
     def validation_epoch_end(self, losses, accuracies):
 
@@ -296,15 +301,17 @@ class TrainableTransformer(torch.nn.Module):
             "val_loss": loss,
             "val_accuracy": accuracy,
         }
+        self.log_dict(logs, to_json=True)
+        paramnorms = {}
         for name, param in self.transformer.named_parameters():
             # n parameters
             n_params = param.numel()
             # get the l2 norm of the parameter
-            logs["paramnorm_" + name] = torch.norm(
+            paramnorms["paramnorm_" + name] = torch.norm(
                 param, 2
             ).detach().cpu().numpy() / np.sqrt(n_params)
 
-        self.log_dict(logs)
+        self.log_dict(paramnorms)
 
         if not self.hparams.no_log and (
             self.best_val_loss < self.next_checkpoint_val_loss
@@ -393,7 +400,7 @@ def train(hparams: Namespace) -> None:
         )
         model.current_epoch += 1
         if finish_at_epoch is None and va > 99.9:
-            finish_at_epoch = epoch + 500  # give it some more
+            finish_at_epoch = epoch + int(.2*epoch)  # give it ~20% more
             print(
                 f"generalization achieved at epoch {epoch}, stopping at {finish_at_epoch}"
             )
@@ -401,6 +408,9 @@ def train(hparams: Namespace) -> None:
         if epoch == finish_at_epoch:
             break
 
+    #persist json files
+    with open(os.path.join(model.logdir, "performance_info.json"), "w") as f:
+        json.dump(model.json_persisted_info, f) 
 
 def add_args(parser=None) -> Namespace:
     """

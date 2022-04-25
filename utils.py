@@ -1,3 +1,5 @@
+import numpy as np
+
 def train_cmd(
     weight_decay=0,
     optimizer="adamw",
@@ -28,3 +30,6 @@ def train_cmd(
             f"--esam_gamma {esam_gamma}",
         ]
     )
+
+
+weight_decays = [0] + list(np.exp(np.linspace(-4, 1, 19)))

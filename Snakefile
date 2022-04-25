@@ -1,4 +1,4 @@
-from utils import train_cmd
+from utils import train_cmd, weight_decays
 from pytools.persistent_dict import PersistentDict
 from time import sleep
 
@@ -22,38 +22,44 @@ def run_on_free_gpu(cmd):
     gpu_jobs.store(f"gpu{cuda_id}", gpu_jobs.fetch(f"gpu{cuda_id}") - 1)
     break
 
+class Locations:
+  weight_decay = "logs/weight_decay_{wd}_seed_{seed}"
+  dropout = "logs/dropout_{do}_seed_{seed}"
+  slow_decoder = "logs/decoder_lr_{lr}_multiplier_{mlr}_seed_{seed}"
+  esam = "logs/esam_rho_{rho}_beta_{beta}_seed_{seed}"
+
 rule all:
   input:
-    expand("logs/weight_decay_{wd}_seed_{seed}", wd=[0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100], seed=[1,2]),
-    expand("logs/dropout_{do}_seed_{seed}", do=[0, .1, .2, .3, .4, .5], seed=[1,2]),
-    expand("logs/decoder_lr_{lr}_multiplier_{mlr}_seed_{seed}", lr=[1, .1, .01, .001], mlr=[.001, .01], seed=[1,2]),
-    expand("logs/esam_rho_{rho}_beta_{beta}_seed_{seed}", rho=[.01, .05, .1, .5, 1], beta=[.5, 1], seed=[1,2]),
+    expand(Locations.weight_decay, wd=weight_decays, seed=[1,2,3]),
+    # expand(Locations.dropout, do=[0, .1, .2, .3, .4, .5], seed=[1,2]),
+    # expand(Locations.slow_decoder, lr=[1, .1, .01, .001], mlr=[.001, .01], seed=[1,2]),
+    # expand(Locations.esam, rho=[.01, .05, .1, .5, 1], beta=[.5, 1], seed=[1,2]),
 
 
 rule with_weight_decay:
   output: 
-    logs = directory("logs/weight_decay_{wd}_seed_{seed}")
+    logs = directory(Locations.weight_decay)
   run: 
     cmd = train_cmd(weight_decay=wildcards.wd, random_seed=wildcards.seed)
     run_on_free_gpu(cmd + f" --logdir={output.logs}")
 
 rule with_dropout:
   output: 
-    logs = directory("logs/dropout_{do}_seed_{seed}")
+    logs = directory(Locations.dropout)
   run: 
     cmd = train_cmd(dropout=wildcards.do, random_seed=wildcards.seed)
     run_on_free_gpu(cmd + f" --logdir={output.logs}")
 
 rule with_slow_decoder:
   output: 
-    logs = directory("logs/decoder_lr_{lr}_multiplier_{mlr}_seed_{seed}")
+    logs = directory(Locations.slow_decoder)
   run: 
     cmd = train_cmd(decoder_lr=wildcards.lr, random_seed=wildcards.seed, lr_multiplier=wildcards.mlr)
     run_on_free_gpu(cmd + f" --logdir={output.logs}")
 
 rule with_esam:
   output:
-    logs = directory("logs/esam_rho_{rho}_beta_{beta}_seed_{seed}")
+    logs = directory(Locations.esam)
   run:
     cmd = train_cmd(esam_rho=wildcards.rho, esam_beta=wildcards.beta, random_seed=wildcards.seed)
     run_on_free_gpu(cmd + f" --esam --logdir={output.logs}")
