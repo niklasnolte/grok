@@ -1,4 +1,4 @@
-from utils import train_cmd, weight_decays
+from utils import train_cmd, weight_decays, dropouts, esam_rhos, decoder_lrs
 from pytools.persistent_dict import PersistentDict
 from time import sleep
 
@@ -11,7 +11,6 @@ onstart:
 def run_on_free_gpu(cmd):
   while True:
     job_counts = [gpu_jobs.fetch("gpu0"), gpu_jobs.fetch("gpu1")]
-    print(job_counts)
     if job_counts[0] >= 3 and job_counts[1] >= 3: # at most 3 jobs per gpu
       sleep(15)
       continue
@@ -30,10 +29,10 @@ class Locations:
 
 rule all:
   input:
-    expand(Locations.weight_decay, wd=weight_decays, seed=[1,2,3]),
-    # expand(Locations.dropout, do=[0, .1, .2, .3, .4, .5], seed=[1,2]),
-    # expand(Locations.slow_decoder, lr=[1, .1, .01, .001], mlr=[.001, .01], seed=[1,2]),
-    # expand(Locations.esam, rho=[.01, .05, .1, .5, 1], beta=[.5, 1], seed=[1,2]),
+    #expand(Locations.weight_decay, wd=weight_decays, seed=[1,2,3]),
+    expand(Locations.dropout, do=dropouts, seed=[1,2,3]),
+    expand(Locations.slow_decoder, lr=decoder_lrs, mlr=[.001], seed=[1,2,3]),
+    expand(Locations.esam, rho=esam_rhos, beta=[.5, 1], seed=[1,2,3]),
 
 
 rule with_weight_decay:

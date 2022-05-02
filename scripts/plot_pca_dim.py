@@ -46,7 +46,8 @@ def get_pca_dim(checkpoint: str, embedding: bool = False):
             emb = emb / np.linalg.norm(emb, ord=1, axis=1, keepdims=True)
         
         pca = PCA().fit(emb)
-        return np.argmax(np.cumsum(pca.explained_variance_ratio_) > .8), acc, loss
+        # return np.argmax(np.cumsum(pca.explained_variance_ratio_) > .8), acc, loss
+        return np.exp(-np.sum(pca.explained_variance_ratio_*np.log(pca.explained_variance_ratio_))), acc, loss
 
 def savepath_from_ckpt(checkpoint: str, embedding: bool):
     return (
@@ -82,9 +83,10 @@ if __name__ == "__main__":
         expl_vars.append(expl_var)
         losss.append(loss)
 
-    plt.scatter(accs, expl_vars, c=np.log(losss), alpha=.5)
-    plt.xlabel("accuracy")
-    plt.ylabel("n_components to explain 80% variance")
-    plt.colorbar()
-    plt.title(f"weight decay {hparams['weight_decay']}")
+    plt.scatter(np.log(losss), expl_vars, c=accs, alpha=.5)
+    plt.xlabel("log(loss)")
+    plt.ylabel("effective dimension")
+    cb = plt.colorbar()
+    cb.set_label("accuracy")
+    plt.title(f"weight decay {hparams['weight_decay']}, emb weight decay {hparams.get('weight_decay_emb', 0)}")
     plt.show()

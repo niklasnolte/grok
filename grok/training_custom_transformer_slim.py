@@ -90,7 +90,7 @@ class TrainableTransformer(torch.nn.Module):
                     os.path.join(self.checkpoint_path, "init.ckpt",),
                 )
 
-        self.optimizer, self.scheduler = self.configure_optim()
+            self.optimizer, self.scheduler = self.configure_optim()
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -137,12 +137,13 @@ class TrainableTransformer(torch.nn.Module):
         parser.add_argument("--embedding_lr", type=float, default=1)
         parser.add_argument("--linear_lr", type=float, default=1)
         parser.add_argument("--weight_decay", type=float, default=0)
-        parser.add_argument("--weight_decay_kind", type=str, default="to_zero")
+        parser.add_argument("--weight_decay_emb", type=float, default=0)
         parser.add_argument("--noise_factor", type=float, default=0)
         parser.add_argument("--esam", action="store_true")
         parser.add_argument("--esam_rho", type=float, default=0.05)
         parser.add_argument("--esam_beta", type=float, default=1)
         parser.add_argument("--esam_gamma", type=float, default=1)
+        parser.add_argument("--adam_eps", type=float, default=1e-8)
         parser.add_argument(
             "--beta1", type=float, default=0.9, help="Adam beta1, momentum in sgd",
         )
@@ -189,7 +190,7 @@ class TrainableTransformer(torch.nn.Module):
         if optim_str in ["adam", "adamw"]:
             optim_fn = torch.optim.AdamW if optim_str == "adamw" else torch.optim.Adam
             optim_args["betas"] = (self.hparams.beta1, self.hparams.beta2)
-            optim_args["eps"] = 1e-8
+            optim_args["eps"] = self.hparams.adam_eps
             optim_args["amsgrad"] = self.hparams.amsgrad
         elif optim_str == "sgd":
             optim_fn = torch.optim.SGD
@@ -206,6 +207,7 @@ class TrainableTransformer(torch.nn.Module):
             dict(
                 params=self.transformer.embedding.parameters(),
                 lr=self.hparams.embedding_lr,
+                weight_decay=self.hparams.weight_decay_emb,
             ),
             dict(
                 params=self.transformer.linear.parameters(),
@@ -399,7 +401,7 @@ def train(hparams: Namespace) -> None:
             f"train loss: {tl:.3e}, train acc: {ta:.3f}, val loss: {vl:.3e}, val acc: {va:.3f}"
         )
         model.current_epoch += 1
-        if finish_at_epoch is None and va > 99.9:
+        if not hparams.finish_running and finish_at_epoch is None and va > 99.9:
             finish_at_epoch = epoch + int(.2*epoch)  # give it ~20% more
             print(
                 f"generalization achieved at epoch {epoch}, stopping at {finish_at_epoch}"
@@ -424,7 +426,8 @@ def add_args(parser=None) -> Namespace:
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--max_epochs", type=int, default=100000)
     parser.add_argument("--no_log", action="store_true")
-    parser.set_defaults(no_log=False)
+    parser.add_argument("--finish_running", action="store_true")
+    parser.set_defaults(no_log=False, finish_running=False)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser
 
