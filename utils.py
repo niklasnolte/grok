@@ -32,4 +32,15 @@ def train_cmd(
     )
 
 
-weight_decays = [0] + list(np.exp(np.linspace(-4, 1, 19)))
+weight_decays = [0] + list(np.exp(np.linspace(-4, 2, 19)))
+#weight_decays = [0] + list(np.exp(np.linspace(-4, 1, 19)))
+dropouts = np.linspace(0, .5, 10)
+decoder_lrs = list(np.exp(np.linspace(-9, -3, 12)))
+#decoder_lrs = list(np.exp(np.linspace(-6, .1, 9)))
+esam_rhos = list(np.exp(np.linspace(-4, 1, 9)))
+
+weight_decays_phaseplot = list(np.exp(np.linspace(-4, 2, 19)))
+decoder_lrs_phaseplot = list(np.exp(np.linspace(-9, -3, 19)))
+
+# weight_decays_phaseplot = list(np.exp(np.linspace(-4, 2, 11)))
+# decoder_lrs_phaseplot = list(np.exp(np.linspace(-9, -3, 11)))
