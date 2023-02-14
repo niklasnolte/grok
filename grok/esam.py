@@ -70,7 +70,7 @@ class ESAM(torch.optim.Optimizer):
         model.require_backward_grad_sync = False
         model.require_forward_param_sync = True
 
-
+        breakpoint()
         logits = model(inputs)
         loss = loss_fct(logits,targets)
 
@@ -108,7 +108,7 @@ class ESAM(torch.optim.Optimizer):
 
         model.require_backward_grad_sync = True
         model.require_forward_param_sync = False
-
+        breakpoint()
         loss = loss_fct(model(inputs[indices]), targets[indices])
         loss = loss.mean()
         defined_backward(loss)
